@@ -1,3 +1,98 @@
+# Building `ripgrep` with Cosmopolitan Libc
+
+This repository contains exactly 2 lines of changes that get `ripgrep` to build
+with [Cosmopolitan Libc][cosmo].
+
+To build this repo you need a recent version of `gcc` (9 or 10 ought to be
+good), a recent version of `binutils` (`ld.bfd` and `objcopy`), and `bash`
+because I wrote a simple filter script.
+
+I created a [custom compilation target][custom-target] for Rust, called
+`x86_64-unknown-linux-cosmo`, to provide a build process that uses the
+Cosmopolitan Libc amalgamation and `cargo`. I followed the documentation in the
+[Rust Embedonomicon][custom-embed] to create the target.
+
+## Steps to build
+
+1. Download the Cosmopolitan Libc [amalgamation][amalg-download] into the `libcosmo` folder:
+
+```bash
+mkdir libcosmo
+cd libcosmo
+wget https://justine.lol/cosmopolitan/cosmopolitan.zip
+unzip cosmopolitan.zip
+ls -al
+# should have cosmopolitan.a, ape.lds etc.
+cd ../
+```
+
+For reference, I used the nightly version of `cosmopolitan.a` from September 9 2022,
+which can be built from source if needed from [this commit][cosmo-nightly].
+
+2. Download the necessary host toolchain and source code for Rust:
+
+```bash
+# I was on Debian 11, so I did this
+rustup toolchain install nightly-x86_64-unknown-linux-gnu
+rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+# on Alpine Linux, you may need to do
+rustup toolchain install nightly-x86_64-unknown-linux-musl
+rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-musl
+```
+
+For reference, this worked when I tried it for `nightly-x86_64-linux-gnu` and:
+
+* the Rust binaries on September 6 2022 (78a891d36 2022-09-06)
+
+3. run `cargo build` to get the executable. This uses a bash script that
+   removes unnecessary linker arguments. A recent version of `gcc` and `ld.bfd`
+   is required.
+
+```bash
+# I'm using --release here, but you can also build without that
+cargo +nightly build --release  \
+    -Zbuild-std=panic_abort,std -Zbuild-std-features="" \
+    --target=./x86_64-unknown-linux-cosmo.json \
+    --features='pcre2 simd-accel'
+```
+
+For reference, I used the below versions of `gcc` and `ld.bfd`
+
+```
+gcc (Debian 10.4.0-4) 10.4.0
+Copyright (C) 2020 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+```
+
+```
+GNU ld (GNU Binutils for Debian) 2.38.90.20220713
+Copyright (C) 2022 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) a later version.
+This program has absolutely no warranty.
+```
+
+4. run `objcopy` to obtain the APE:
+
+```bash
+# look at the built release binaries
+ls ./target/x86_64-unknown-linux-cosmo/release/*.com.dbg
+# objcopy is the same version as ld.bfd above
+objcopy -SO binary ./target/x86_64-unknown-linux-cosmo/release/rg.com.dbg ./rg.com
+# run the APE or copy it to wherever you want
+./rg.com --help
+./rg.com "aaaa" ./
+```
+
+Now we have `ripgrep` building with Cosmopolitan Libc!
+
+[amalg-download]: https://justine.lol/cosmopolitan/download.html
+[cosmo]: https://github.com/jart/cosmopolitan
+[cosmo-nightly]: https://github.com/jart/cosmopolitan/commit/e9272f03fbdadee8ced8670514ec5f987c47bbd2
+[custom-target]: https://doc.rust-lang.org/rustc/targets/custom.html
+[custom-embed]: https://docs.rust-embedded.org/embedonomicon/custom-target.html
+
 ripgrep (rg)
 ------------
 ripgrep is a line-oriented search tool that recursively searches the current

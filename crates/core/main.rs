@@ -39,7 +39,7 @@ mod subject;
 //
 // Moreover, we only do this on 64-bit systems since jemalloc doesn't support
 // i686.
-#[cfg(all(target_env = "musl", target_pointer_width = "64"))]
+#[cfg(all(target_env = "dont-compile", target_pointer_width = "64"))]
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
