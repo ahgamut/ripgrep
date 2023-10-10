@@ -120,7 +120,7 @@ them to the corresponding number of bytes (`2 * 1<<20` in this case). If an
 invalid size is found, then a good error message is crafted that typically
 tells the user how to fix the problem.
 */
-
+#![feature(rustc_private)]
 #![deny(missing_docs)]
 
 mod decompress;
