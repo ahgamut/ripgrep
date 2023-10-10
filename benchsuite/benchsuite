@@ -26,15 +26,13 @@ SUBTITLES_DIR = 'subtitles'
 SUBTITLES_EN_NAME = 'en.txt'
 SUBTITLES_EN_NAME_SAMPLE = 'en.sample.txt'
 SUBTITLES_EN_NAME_GZ = '%s.gz' % SUBTITLES_EN_NAME
-# SUBTITLES_EN_URL = 'http://opus.lingfil.uu.se/OpenSubtitles2016/mono/OpenSubtitles2016.raw.en.gz'  # noqa
 SUBTITLES_EN_URL = 'https://object.pouta.csc.fi/OPUS-OpenSubtitles/v2016/mono/en.txt.gz'  # noqa
 SUBTITLES_RU_NAME = 'ru.txt'
 SUBTITLES_RU_NAME_GZ = '%s.gz' % SUBTITLES_RU_NAME
-# SUBTITLES_RU_URL = 'http://opus.lingfil.uu.se/OpenSubtitles2016/mono/OpenSubtitles2016.raw.ru.gz'  # noqa
 SUBTITLES_RU_URL = 'https://object.pouta.csc.fi/OPUS-OpenSubtitles/v2016/mono/ru.txt.gz'  # noqa
 
 LINUX_DIR = 'linux'
-LINUX_CLONE = 'git://github.com/BurntSushi/linux'
+LINUX_CLONE = 'https://github.com/BurntSushi/linux'
 
 # Grep takes locale settings from the environment. There is a *substantial*
 # performance impact for enabling Unicode, so we need to handle this explicitly
@@ -546,7 +544,11 @@ def bench_subtitles_ru_literal(suite_dir):
         Command('rg (lines)', ['rg', '-n', pat, ru]),
         Command('ag (lines)', ['ag', '-s', pat, ru]),
         Command('grep (lines)', ['grep', '-n', pat, ru], env=GREP_ASCII),
-        Command('ugrep (lines)', ['ugrep', '-n', pat, ru])
+        # ugrep incorrectly identifies this corpus as binary, but it is
+        # entirely valid UTF-8. So we tell ugrep to always treat the corpus
+        # as text even though this technically gives it an edge over other
+        # tools. (It no longer needs to check for binary data.)
+        Command('ugrep (lines)', ['ugrep', '-a', '-n', pat, ru])
     ])
 
 
@@ -564,7 +566,8 @@ def bench_subtitles_ru_literal_casei(suite_dir):
         Command('grep (ASCII)', ['grep', '-E', '-i', pat, ru], env=GREP_ASCII),
         Command('rg (lines)', ['rg', '-n', '-i', pat, ru]),
         Command('ag (lines) (ASCII)', ['ag', '-i', pat, ru]),
-        Command('ugrep (lines) (ASCII)', ['ugrep', '-n', '-i', pat, ru])
+        # See bench_subtitles_ru_literal for why we use '-a' here.
+        Command('ugrep (lines) (ASCII)', ['ugrep', '-a', '-n', '-i', pat, ru])
     ])
 
 
@@ -588,7 +591,8 @@ def bench_subtitles_ru_literal_word(suite_dir):
         Command('grep (ASCII)', [
             'grep', '-nw', pat, ru,
         ], env=GREP_ASCII),
-        Command('ugrep (ASCII)', ['ugrep', '-nw', pat, ru]),
+        # See bench_subtitles_ru_literal for why we use '-a' here.
+        Command('ugrep (ASCII)', ['ugrep', '-anw', pat, ru]),
         Command('rg', ['rg', '-nw', pat, ru]),
         Command('grep', ['grep', '-nw', pat, ru], env=GREP_UNICODE),
     ])
@@ -612,7 +616,8 @@ def bench_subtitles_ru_alternate(suite_dir):
         Command('rg (lines)', ['rg', '-n', pat, ru]),
         Command('ag (lines)', ['ag', '-s', pat, ru]),
         Command('grep (lines)', ['grep', '-E', '-n', pat, ru], env=GREP_ASCII),
-        Command('ugrep (lines)', ['ugrep', '-n', pat, ru]),
+        # See bench_subtitles_ru_literal for why we use '-a' here.
+        Command('ugrep (lines)', ['ugrep', '-an', pat, ru]),
         Command('rg', ['rg', pat, ru]),
         Command('grep', ['grep', '-E', pat, ru], env=GREP_ASCII),
     ])
@@ -637,7 +642,8 @@ def bench_subtitles_ru_alternate_casei(suite_dir):
         Command('grep (ASCII)', [
             'grep', '-E', '-ni', pat, ru,
         ], env=GREP_ASCII),
-        Command('ugrep (ASCII)', ['ugrep', '-n', '-i', pat, ru]),
+        # See bench_subtitles_ru_literal for why we use '-a' here.
+        Command('ugrep (ASCII)', ['ugrep', '-ani', pat, ru]),
         Command('rg', ['rg', '-n', '-i', pat, ru]),
         Command('grep', ['grep', '-E', '-ni', pat, ru], env=GREP_UNICODE),
     ])
@@ -654,10 +660,11 @@ def bench_subtitles_ru_surrounding_words(suite_dir):
     return Benchmark(pattern=pat, commands=[
         Command('rg', ['rg', '-n', pat, ru]),
         Command('grep', ['grep', '-E', '-n', pat, ru], env=GREP_UNICODE),
-        Command('ugrep', ['ugrep', '-n', pat, ru]),
+        Command('ugrep', ['ugrep', '-an', pat, ru]),
         Command('ag (ASCII)', ['ag', '-s', pat, ru]),
         Command('grep (ASCII)', ['grep', '-E', '-n', pat, ru], env=GREP_ASCII),
-        Command('ugrep (ASCII)', ['ugrep', '-n', '-U', pat, ru]),
+        # See bench_subtitles_ru_literal for why we use '-a' here.
+        Command('ugrep (ASCII)', ['ugrep', '-a', '-n', '-U', pat, ru]),
     ])
 
 
@@ -676,11 +683,13 @@ def bench_subtitles_ru_no_literal(suite_dir):
 
     return Benchmark(pattern=pat, commands=[
         Command('rg', ['rg', '-n', pat, ru]),
-        Command('ugrep', ['ugrep', '-n', pat, ru]),
+        # See bench_subtitles_ru_literal for why we use '-a' here.
+        Command('ugrep', ['ugrep', '-an', pat, ru]),
         Command('rg (ASCII)', ['rg', '-n', '(?-u)' + pat, ru]),
         Command('ag (ASCII)', ['ag', '-s', pat, ru]),
         Command('grep (ASCII)', ['grep', '-E', '-n', pat, ru], env=GREP_ASCII),
-        Command('ugrep (ASCII)', ['ugrep', '-n', '-U', pat, ru])
+        # See bench_subtitles_ru_literal for why we use '-a' here.
+        Command('ugrep (ASCII)', ['ugrep', '-anU', pat, ru])
     ])
 
 

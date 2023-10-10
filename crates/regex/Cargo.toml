@@ -1,6 +1,6 @@
 [package]
 name = "grep-regex"
-version = "0.1.10"  #:version
+version = "0.1.11"  #:version
 authors = ["Andrew Gallant <jamslam@gmail.com>"]
 description = """
 Use Rust's regex library with the 'grep' crate.
@@ -11,13 +11,11 @@ repository = "https://github.com/BurntSushi/ripgrep/tree/master/crates/regex"
 readme = "README.md"
 keywords = ["regex", "grep", "search", "pattern", "line"]
 license = "Unlicense OR MIT"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
-aho-corasick = "0.7.3"
-bstr = "0.2.10"
-grep-matcher = { version = "0.1.5", path = "../matcher" }
-log = "0.4.5"
-regex = "1.1"
-regex-syntax = "0.6.5"
-thread_local = "1.1.2"
+bstr = "1.6.2"
+grep-matcher = { version = "0.1.6", path = "../matcher" }
+log = "0.4.20"
+regex-automata = { version = "0.4.0" }
+regex-syntax = "0.8.0"

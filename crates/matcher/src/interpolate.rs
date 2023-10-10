@@ -1,5 +1,3 @@
-use std::str;
-
 use memchr::memchr;
 
 /// Interpolate capture references in `replacement` and write the interpolation
@@ -12,6 +10,7 @@ use memchr::memchr;
 /// of a capture group reference and is expected to resolve the index to its
 /// corresponding matched text. If no such match exists, then `append` should
 /// not write anything to its given buffer.
+#[inline]
 pub fn interpolate<A, N>(
     mut replacement: &[u8],
     mut append: A,
@@ -77,12 +76,14 @@ enum Ref<'a> {
 }
 
 impl<'a> From<&'a str> for Ref<'a> {
+    #[inline]
     fn from(x: &'a str) -> Ref<'a> {
         Ref::Named(x)
     }
 }
 
 impl From<usize> for Ref<'static> {
+    #[inline]
     fn from(x: usize) -> Ref<'static> {
         Ref::Number(x)
     }
@@ -92,6 +93,7 @@ impl From<usize> for Ref<'static> {
 /// starting at the beginning of `replacement`.
 ///
 /// If no such valid reference could be found, None is returned.
+#[inline]
 fn find_cap_ref(replacement: &[u8]) -> Option<CaptureRef<'_>> {
     let mut i = 0;
     if replacement.len() <= 1 || replacement[0] != b'$' {
@@ -114,7 +116,7 @@ fn find_cap_ref(replacement: &[u8]) -> Option<CaptureRef<'_>> {
     // therefore be valid UTF-8. If we really cared, we could avoid this UTF-8
     // check with an unchecked conversion or by parsing the number straight
     // from &[u8].
-    let cap = str::from_utf8(&replacement[i..cap_end])
+    let cap = std::str::from_utf8(&replacement[i..cap_end])
         .expect("valid UTF-8 capture name");
     if brace {
         if !replacement.get(cap_end).map_or(false, |&b| b == b'}') {
@@ -132,6 +134,7 @@ fn find_cap_ref(replacement: &[u8]) -> Option<CaptureRef<'_>> {
 }
 
 /// Returns true if and only if the given byte is allowed in a capture name.
+#[inline]
 fn is_valid_cap_letter(b: &u8) -> bool {
     match *b {
         b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'_' => true,

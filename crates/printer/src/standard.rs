@@ -1,24 +1,31 @@
-use std::cell::{Cell, RefCell};
-use std::cmp;
-use std::io::{self, Write};
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Instant;
-
-use bstr::ByteSlice;
-use grep_matcher::{Match, Matcher};
-use grep_searcher::{
-    LineStep, Searcher, Sink, SinkContext, SinkContextKind, SinkFinish,
-    SinkMatch,
+use std::{
+    cell::{Cell, RefCell},
+    cmp,
+    io::{self, Write},
+    path::Path,
+    sync::Arc,
+    time::Instant,
 };
-use termcolor::{ColorSpec, NoColor, WriteColor};
 
-use crate::color::ColorSpecs;
-use crate::counter::CounterWriter;
-use crate::stats::Stats;
-use crate::util::{
-    find_iter_at_in_context, trim_ascii_prefix, trim_line_terminator,
-    PrinterPath, Replacer, Sunk,
+use {
+    bstr::ByteSlice,
+    grep_matcher::{Match, Matcher},
+    grep_searcher::{
+        LineStep, Searcher, Sink, SinkContext, SinkContextKind, SinkFinish,
+        SinkMatch,
+    },
+    termcolor::{ColorSpec, NoColor, WriteColor},
+};
+
+use crate::{
+    color::ColorSpecs,
+    counter::CounterWriter,
+    hyperlink::{self, HyperlinkConfig},
+    stats::Stats,
+    util::{
+        find_iter_at_in_context, trim_ascii_prefix, trim_line_terminator,
+        DecimalFormatter, PrinterPath, Replacer, Sunk,
+    },
 };
 
 /// The configuration for the standard printer.
@@ -29,6 +36,7 @@ use crate::util::{
 #[derive(Debug, Clone)]
 struct Config {
     colors: ColorSpecs,
+    hyperlink: HyperlinkConfig,
     stats: bool,
     heading: bool,
     path: bool,
@@ -54,6 +62,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             colors: ColorSpecs::default(),
+            hyperlink: HyperlinkConfig::default(),
             stats: false,
             heading: false,
             path: true,
@@ -140,11 +149,11 @@ impl StandardBuilder {
 
     /// Set the user color specifications to use for coloring in this printer.
     ///
-    /// A [`UserColorSpec`](struct.UserColorSpec.html) can be constructed from
-    /// a string in accordance with the color specification format. See the
-    /// `UserColorSpec` type documentation for more details on the format.
-    /// A [`ColorSpecs`](struct.ColorSpecs.html) can then be generated from
-    /// zero or more `UserColorSpec`s.
+    /// A [`UserColorSpec`](crate::UserColorSpec) can be constructed from
+    /// a string in accordance with the color specification format. See
+    /// the `UserColorSpec` type documentation for more details on the
+    /// format. A [`ColorSpecs`] can then be generated from zero or more
+    /// `UserColorSpec`s.
     ///
     /// Regardless of the color specifications provided here, whether color
     /// is actually used or not is determined by the implementation of
@@ -160,6 +169,25 @@ impl StandardBuilder {
         self
     }
 
+    /// Set the configuration to use for hyperlinks output by this printer.
+    ///
+    /// Regardless of the hyperlink format provided here, whether hyperlinks
+    /// are actually used or not is determined by the implementation of
+    /// `WriteColor` provided to `build`. For example, if `termcolor::NoColor`
+    /// is provided to `build`, then no hyperlinks will ever be printed
+    /// regardless of the format provided here.
+    ///
+    /// This completely overrides any previous hyperlink format.
+    ///
+    /// The default configuration results in not emitting any hyperlinks.
+    pub fn hyperlink(
+        &mut self,
+        config: HyperlinkConfig,
+    ) -> &mut StandardBuilder {
+        self.config.hyperlink = config;
+        self
+    }
+
     /// Enable the gathering of various aggregate statistics.
     ///
     /// When this is enabled (it's disabled by default), statistics will be
@@ -168,15 +196,13 @@ impl StandardBuilder {
     /// number of bytes searched and the total number of bytes printed.
     ///
     /// Aggregate statistics can be accessed via the sink's
-    /// [`StandardSink::stats`](struct.StandardSink.html#method.stats)
-    /// method.
+    /// [`StandardSink::stats`] method.
     ///
     /// When this is enabled, this printer may need to do extra work in order
     /// to compute certain statistics, which could cause the search to take
     /// longer.
     ///
-    /// For a complete description of available statistics, see
-    /// [`Stats`](struct.Stats.html).
+    /// For a complete description of available statistics, see [`Stats`].
     pub fn stats(&mut self, yes: bool) -> &mut StandardBuilder {
         self.config.stats = yes;
         self
@@ -456,7 +482,7 @@ impl StandardBuilder {
 /// A default printer can be created with either of the `Standard::new` or
 /// `Standard::new_no_color` constructors. However, there are a considerable
 /// number of options that configure this printer's output. Those options can
-/// be configured using [`StandardBuilder`](struct.StandardBuilder.html).
+/// be configured using [`StandardBuilder`].
 ///
 /// This type is generic over `W`, which represents any implementation
 /// of the `termcolor::WriteColor` trait. If colors are not desired,
@@ -503,19 +529,22 @@ impl<W: WriteColor> Standard<W> {
         &'s mut self,
         matcher: M,
     ) -> StandardSink<'static, 's, M, W> {
+        let interpolator =
+            hyperlink::Interpolator::new(&self.config.hyperlink);
         let stats = if self.config.stats { Some(Stats::new()) } else { None };
         let needs_match_granularity = self.needs_match_granularity();
         StandardSink {
-            matcher: matcher,
+            matcher,
             standard: self,
             replacer: Replacer::new(),
+            interpolator,
             path: None,
             start_time: Instant::now(),
             match_count: 0,
             after_context_remaining: 0,
             binary_byte_offset: None,
-            stats: stats,
-            needs_match_granularity: needs_match_granularity,
+            stats,
+            needs_match_granularity,
         }
     }
 
@@ -535,23 +564,24 @@ impl<W: WriteColor> Standard<W> {
         if !self.config.path {
             return self.sink(matcher);
         }
+        let interpolator =
+            hyperlink::Interpolator::new(&self.config.hyperlink);
         let stats = if self.config.stats { Some(Stats::new()) } else { None };
-        let ppath = PrinterPath::with_separator(
-            path.as_ref(),
-            self.config.separator_path,
-        );
+        let ppath = PrinterPath::new(path.as_ref())
+            .with_separator(self.config.separator_path);
         let needs_match_granularity = self.needs_match_granularity();
         StandardSink {
-            matcher: matcher,
+            matcher,
             standard: self,
             replacer: Replacer::new(),
+            interpolator,
             path: Some(ppath),
             start_time: Instant::now(),
             match_count: 0,
             after_context_remaining: 0,
             binary_byte_offset: None,
-            stats: stats,
-            needs_match_granularity: needs_match_granularity,
+            stats,
+            needs_match_granularity,
         }
     }
 
@@ -601,12 +631,9 @@ impl<W> Standard<W> {
 /// An implementation of `Sink` associated with a matcher and an optional file
 /// path for the standard printer.
 ///
-/// A `Sink` can be created via the
-/// [`Standard::sink`](struct.Standard.html#method.sink)
-/// or
-/// [`Standard::sink_with_path`](struct.Standard.html#method.sink_with_path)
-/// methods, depending on whether you want to include a file path in the
-/// printer's output.
+/// A `Sink` can be created via the [`Standard::sink`] or
+/// [`Standard::sink_with_path`] methods, depending on whether you want to
+/// include a file path in the printer's output.
 ///
 /// Building a `StandardSink` is cheap, and callers should create a new one
 /// for each thing that is searched. After a search has completed, callers may
@@ -616,19 +643,19 @@ impl<W> Standard<W> {
 /// This type is generic over a few type parameters:
 ///
 /// * `'p` refers to the lifetime of the file path, if one is provided. When
-///   no file path is given, then this is `'static`.
-/// * `'s` refers to the lifetime of the
-///   [`Standard`](struct.Standard.html)
-///   printer that this type borrows.
+/// no file path is given, then this is `'static`.
+/// * `'s` refers to the lifetime of the [`Standard`] printer that this type
+/// borrows.
 /// * `M` refers to the type of matcher used by
-///   `grep_searcher::Searcher` that is reporting results to this sink.
+/// `grep_searcher::Searcher` that is reporting results to this sink.
 /// * `W` refers to the underlying writer that this printer is writing its
-///   output to.
+/// output to.
 #[derive(Debug)]
 pub struct StandardSink<'p, 's, M: Matcher, W> {
     matcher: M,
     standard: &'s mut Standard<W>,
     replacer: Replacer<M>,
+    interpolator: hyperlink::Interpolator,
     path: Option<PrinterPath<'p>>,
     start_time: Instant,
     match_count: u64,
@@ -677,8 +704,7 @@ impl<'p, 's, M: Matcher, W: WriteColor> StandardSink<'p, 's, M, W> {
     /// searches executed on this sink.
     ///
     /// This only returns stats if they were requested via the
-    /// [`StandardBuilder`](struct.StandardBuilder.html)
-    /// configuration.
+    /// [`StandardBuilder`] configuration.
     pub fn stats(&self) -> Option<&Stats> {
         self.stats.as_ref()
     }
@@ -919,8 +945,8 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
         sink: &'a StandardSink<'_, '_, M, W>,
     ) -> StandardImpl<'a, M, W> {
         StandardImpl {
-            searcher: searcher,
-            sink: sink,
+            searcher,
+            sink,
             sunk: Sunk::empty(),
             in_color_match: Cell::new(false),
         }
@@ -938,7 +964,7 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
             &sink.standard.matches,
             sink.replacer.replacement(),
         );
-        StandardImpl { sunk: sunk, ..StandardImpl::new(searcher, sink) }
+        StandardImpl { sunk, ..StandardImpl::new(searcher, sink) }
     }
 
     /// Bundle self with a searcher and return the core implementation of Sink
@@ -953,7 +979,7 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
             &sink.standard.matches,
             sink.replacer.replacement(),
         );
-        StandardImpl { sunk: sunk, ..StandardImpl::new(searcher, sink) }
+        StandardImpl { sunk, ..StandardImpl::new(searcher, sink) }
     }
 
     fn sink(&self) -> io::Result<()> {
@@ -1209,23 +1235,13 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
         line_number: Option<u64>,
         column: Option<u64>,
     ) -> io::Result<()> {
-        let sep = self.separator_field();
-
-        if !self.config().heading {
-            self.write_path_field(sep)?;
-        }
-        if let Some(n) = line_number {
-            self.write_line_number(n, sep)?;
-        }
-        if let Some(n) = column {
-            if self.config().column {
-                self.write_column_number(n, sep)?;
-            }
-        }
-        if self.config().byte_offset {
-            self.write_byte_offset(absolute_byte_offset, sep)?;
-        }
-        Ok(())
+        let mut prelude = PreludeWriter::new(self);
+        prelude.start(line_number, column)?;
+        prelude.write_path()?;
+        prelude.write_line_number(line_number)?;
+        prelude.write_column_number(column)?;
+        prelude.write_byte_offset(absolute_byte_offset)?;
+        prelude.end()
     }
 
     #[inline(always)]
@@ -1386,27 +1402,11 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
     /// terminator.)
     fn write_path_line(&self) -> io::Result<()> {
         if let Some(path) = self.path() {
-            self.write_spec(self.config().colors.path(), path.as_bytes())?;
+            self.write_path_hyperlink(path)?;
             if let Some(term) = self.config().path_terminator {
                 self.write(&[term])?;
             } else {
                 self.write_line_term()?;
-            }
-        }
-        Ok(())
-    }
-
-    /// If this printer has a file path associated with it, then this will
-    /// write that path to the underlying writer followed by the given field
-    /// separator. (If a path terminator is set, then that is used instead of
-    /// the field separator.)
-    fn write_path_field(&self, field_separator: &[u8]) -> io::Result<()> {
-        if let Some(path) = self.path() {
-            self.write_spec(self.config().colors.path(), path.as_bytes())?;
-            if let Some(term) = self.config().path_terminator {
-                self.write(&[term])?;
-            } else {
-                self.write(field_separator)?;
             }
         }
         Ok(())
@@ -1438,7 +1438,7 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
         let bin = self.searcher.binary_detection();
         if let Some(byte) = bin.quit_byte() {
             if let Some(path) = self.path() {
-                self.write_spec(self.config().colors.path(), path.as_bytes())?;
+                self.write_path_hyperlink(path)?;
                 self.write(b": ")?;
             }
             let remainder = format!(
@@ -1450,7 +1450,7 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
             self.write(remainder.as_bytes())?;
         } else if let Some(byte) = bin.convert_byte() {
             if let Some(path) = self.path() {
-                self.write_spec(self.config().colors.path(), path.as_bytes())?;
+                self.write_path_hyperlink(path)?;
                 self.write(b": ")?;
             }
             let remainder = format!(
@@ -1471,39 +1471,6 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
         Ok(())
     }
 
-    fn write_line_number(
-        &self,
-        line_number: u64,
-        field_separator: &[u8],
-    ) -> io::Result<()> {
-        let n = line_number.to_string();
-        self.write_spec(self.config().colors.line(), n.as_bytes())?;
-        self.write(field_separator)?;
-        Ok(())
-    }
-
-    fn write_column_number(
-        &self,
-        column_number: u64,
-        field_separator: &[u8],
-    ) -> io::Result<()> {
-        let n = column_number.to_string();
-        self.write_spec(self.config().colors.column(), n.as_bytes())?;
-        self.write(field_separator)?;
-        Ok(())
-    }
-
-    fn write_byte_offset(
-        &self,
-        offset: u64,
-        field_separator: &[u8],
-    ) -> io::Result<()> {
-        let n = offset.to_string();
-        self.write_spec(self.config().colors.column(), n.as_bytes())?;
-        self.write(field_separator)?;
-        Ok(())
-    }
-
     fn write_line_term(&self) -> io::Result<()> {
         self.write(self.searcher.line_terminator().as_bytes())
     }
@@ -1514,6 +1481,40 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
         wtr.write_all(buf)?;
         wtr.reset()?;
         Ok(())
+    }
+
+    fn write_path(&self, path: &PrinterPath) -> io::Result<()> {
+        let mut wtr = self.wtr().borrow_mut();
+        wtr.set_color(self.config().colors.path())?;
+        wtr.write_all(path.as_bytes())?;
+        wtr.reset()
+    }
+
+    fn write_path_hyperlink(&self, path: &PrinterPath) -> io::Result<()> {
+        let status = self.start_hyperlink(path, None, None)?;
+        self.write_path(path)?;
+        self.end_hyperlink(status)
+    }
+
+    fn start_hyperlink(
+        &self,
+        path: &PrinterPath,
+        line_number: Option<u64>,
+        column: Option<u64>,
+    ) -> io::Result<hyperlink::InterpolatorStatus> {
+        let Some(hyperpath) = path.as_hyperlink() else {
+            return Ok(hyperlink::InterpolatorStatus::inactive());
+        };
+        let values =
+            hyperlink::Values::new(hyperpath).line(line_number).column(column);
+        self.sink.interpolator.begin(&values, &mut *self.wtr().borrow_mut())
+    }
+
+    fn end_hyperlink(
+        &self,
+        status: hyperlink::InterpolatorStatus,
+    ) -> io::Result<()> {
+        self.sink.interpolator.finish(status, &mut *self.wtr().borrow_mut())
     }
 
     fn start_color_match(&self) -> io::Result<()> {
@@ -1612,6 +1613,159 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
         }
         let lineterm = self.searcher.line_terminator();
         *range = trim_ascii_prefix(lineterm, slice, *range)
+    }
+}
+
+/// A writer for the prelude (the beginning part of a matching line).
+///
+/// This encapsulates the state needed to print the prelude.
+struct PreludeWriter<'a, M: Matcher, W> {
+    std: &'a StandardImpl<'a, M, W>,
+    next_separator: PreludeSeparator,
+    field_separator: &'a [u8],
+    interp_status: hyperlink::InterpolatorStatus,
+}
+
+/// A type of separator used in the prelude
+enum PreludeSeparator {
+    /// No separator.
+    None,
+    /// The field separator, either for a matching or contextual line.
+    FieldSeparator,
+    /// The path terminator.
+    PathTerminator,
+}
+
+impl<'a, M: Matcher, W: WriteColor> PreludeWriter<'a, M, W> {
+    /// Creates a new prelude printer.
+    #[inline(always)]
+    fn new(std: &'a StandardImpl<'a, M, W>) -> PreludeWriter<'a, M, W> {
+        PreludeWriter {
+            std,
+            next_separator: PreludeSeparator::None,
+            field_separator: std.separator_field(),
+            interp_status: hyperlink::InterpolatorStatus::inactive(),
+        }
+    }
+
+    /// Starts the prelude with a hyperlink when applicable.
+    ///
+    /// If a heading was written, and the hyperlink format is invariant on
+    /// the line number, then this doesn't hyperlink each line prelude, as it
+    /// wouldn't point to the line anyway. The hyperlink on the heading should
+    /// be sufficient and less confusing.
+    #[inline(always)]
+    fn start(
+        &mut self,
+        line_number: Option<u64>,
+        column: Option<u64>,
+    ) -> io::Result<()> {
+        let Some(path) = self.std.path() else { return Ok(()) };
+        if self.config().hyperlink.format().is_line_dependent()
+            || !self.config().heading
+        {
+            self.interp_status =
+                self.std.start_hyperlink(path, line_number, column)?;
+        }
+        Ok(())
+    }
+
+    /// Ends the prelude and writes the remaining output.
+    #[inline(always)]
+    fn end(&mut self) -> io::Result<()> {
+        self.std.end_hyperlink(std::mem::replace(
+            &mut self.interp_status,
+            hyperlink::InterpolatorStatus::inactive(),
+        ))?;
+        self.write_separator()
+    }
+
+    /// If this printer has a file path associated with it, then this will
+    /// write that path to the underlying writer followed by the given field
+    /// separator. (If a path terminator is set, then that is used instead of
+    /// the field separator.)
+    #[inline(always)]
+    fn write_path(&mut self) -> io::Result<()> {
+        // The prelude doesn't handle headings, only what comes before a match
+        // on the same line. So if we are emitting paths in headings, we should
+        // not do it here on each line.
+        if self.config().heading {
+            return Ok(());
+        }
+        let Some(path) = self.std.path() else { return Ok(()) };
+        self.write_separator()?;
+        self.std.write_path(path)?;
+
+        self.next_separator = if self.config().path_terminator.is_some() {
+            PreludeSeparator::PathTerminator
+        } else {
+            PreludeSeparator::FieldSeparator
+        };
+        Ok(())
+    }
+
+    /// Writes the line number field if present.
+    #[inline(always)]
+    fn write_line_number(&mut self, line: Option<u64>) -> io::Result<()> {
+        let Some(line_number) = line else { return Ok(()) };
+        self.write_separator()?;
+        let n = DecimalFormatter::new(line_number);
+        self.std.write_spec(self.config().colors.line(), n.as_bytes())?;
+        self.next_separator = PreludeSeparator::FieldSeparator;
+        Ok(())
+    }
+
+    /// Writes the column number field if present and configured to do so.
+    #[inline(always)]
+    fn write_column_number(&mut self, column: Option<u64>) -> io::Result<()> {
+        if !self.config().column {
+            return Ok(());
+        }
+        let Some(column_number) = column else { return Ok(()) };
+        self.write_separator()?;
+        let n = DecimalFormatter::new(column_number);
+        self.std.write_spec(self.config().colors.column(), n.as_bytes())?;
+        self.next_separator = PreludeSeparator::FieldSeparator;
+        Ok(())
+    }
+
+    /// Writes the byte offset field if configured to do so.
+    #[inline(always)]
+    fn write_byte_offset(&mut self, offset: u64) -> io::Result<()> {
+        if !self.config().byte_offset {
+            return Ok(());
+        }
+        self.write_separator()?;
+        let n = DecimalFormatter::new(offset);
+        self.std.write_spec(self.config().colors.column(), n.as_bytes())?;
+        self.next_separator = PreludeSeparator::FieldSeparator;
+        Ok(())
+    }
+
+    /// Writes the separator defined by the preceding field.
+    ///
+    /// This is called before writing the contents of a field, and at
+    /// the end of the prelude.
+    #[inline(always)]
+    fn write_separator(&mut self) -> io::Result<()> {
+        match self.next_separator {
+            PreludeSeparator::None => {}
+            PreludeSeparator::FieldSeparator => {
+                self.std.write(self.field_separator)?;
+            }
+            PreludeSeparator::PathTerminator => {
+                if let Some(term) = self.config().path_terminator {
+                    self.std.write(&[term])?;
+                }
+            }
+        }
+        self.next_separator = PreludeSeparator::None;
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn config(&self) -> &Config {
+        self.std.config()
     }
 }
 

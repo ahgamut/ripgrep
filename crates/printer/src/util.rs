@@ -1,21 +1,20 @@
-use std::borrow::Cow;
-use std::fmt;
-use std::io;
-use std::path::Path;
-use std::time;
+use std::{borrow::Cow, cell::OnceCell, fmt, io, path::Path, time};
 
-use bstr::{ByteSlice, ByteVec};
-use grep_matcher::{Captures, LineTerminator, Match, Matcher};
-use grep_searcher::{
-    LineIter, Searcher, SinkContext, SinkContextKind, SinkError, SinkMatch,
+use {
+    bstr::ByteVec,
+    grep_matcher::{Captures, LineTerminator, Match, Matcher},
+    grep_searcher::{
+        LineIter, Searcher, SinkContext, SinkContextKind, SinkError, SinkMatch,
+    },
 };
-#[cfg(feature = "serde1")]
+
+#[cfg(feature = "serde")]
 use serde::{Serialize, Serializer};
 
-use crate::MAX_LOOK_AHEAD;
+use crate::{hyperlink::HyperlinkPath, MAX_LOOK_AHEAD};
 
 /// A type for handling replacements while amortizing allocation.
-pub struct Replacer<M: Matcher> {
+pub(crate) struct Replacer<M: Matcher> {
     space: Option<Space<M>>,
 }
 
@@ -43,7 +42,7 @@ impl<M: Matcher> Replacer<M> {
     ///
     /// This constructor does not allocate. Instead, space for dealing with
     /// replacements is allocated lazily only when needed.
-    pub fn new() -> Replacer<M> {
+    pub(crate) fn new() -> Replacer<M> {
         Replacer { space: None }
     }
 
@@ -52,7 +51,7 @@ impl<M: Matcher> Replacer<M> {
     /// replacement, use the `replacement` method.
     ///
     /// This can fail if the underlying matcher reports an error.
-    pub fn replace_all<'a>(
+    pub(crate) fn replace_all<'a>(
         &'a mut self,
         searcher: &Searcher,
         matcher: &M,
@@ -110,7 +109,9 @@ impl<M: Matcher> Replacer<M> {
     /// all replacement occurrences within the returned replacement buffer.
     ///
     /// If no replacement has occurred then `None` is returned.
-    pub fn replacement<'a>(&'a self) -> Option<(&'a [u8], &'a [Match])> {
+    pub(crate) fn replacement<'a>(
+        &'a self,
+    ) -> Option<(&'a [u8], &'a [Match])> {
         match self.space {
             None => None,
             Some(ref space) => {
@@ -127,7 +128,7 @@ impl<M: Matcher> Replacer<M> {
     ///
     /// Subsequent calls to `replacement` after calling `clear` (but before
     /// executing another replacement) will always return `None`.
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         if let Some(ref mut space) = self.space {
             space.dst.clear();
             space.matches.clear();
@@ -143,8 +144,7 @@ impl<M: Matcher> Replacer<M> {
         if self.space.is_none() {
             let caps =
                 matcher.new_captures().map_err(io::Error::error_message)?;
-            self.space =
-                Some(Space { caps: caps, dst: vec![], matches: vec![] });
+            self.space = Some(Space { caps, dst: vec![], matches: vec![] });
         }
         Ok(self.space.as_mut().unwrap())
     }
@@ -163,7 +163,7 @@ impl<M: Matcher> Replacer<M> {
 /// results of the replacement instead of the bytes reported directly by the
 /// searcher.
 #[derive(Debug)]
-pub struct Sunk<'a> {
+pub(crate) struct Sunk<'a> {
     bytes: &'a [u8],
     absolute_byte_offset: u64,
     line_number: Option<u64>,
@@ -174,7 +174,7 @@ pub struct Sunk<'a> {
 
 impl<'a> Sunk<'a> {
     #[inline]
-    pub fn empty() -> Sunk<'static> {
+    pub(crate) fn empty() -> Sunk<'static> {
         Sunk {
             bytes: &[],
             absolute_byte_offset: 0,
@@ -186,7 +186,7 @@ impl<'a> Sunk<'a> {
     }
 
     #[inline]
-    pub fn from_sink_match(
+    pub(crate) fn from_sink_match(
         sunk: &'a SinkMatch<'a>,
         original_matches: &'a [Match],
         replacement: Option<(&'a [u8], &'a [Match])>,
@@ -194,17 +194,17 @@ impl<'a> Sunk<'a> {
         let (bytes, matches) =
             replacement.unwrap_or_else(|| (sunk.bytes(), original_matches));
         Sunk {
-            bytes: bytes,
+            bytes,
             absolute_byte_offset: sunk.absolute_byte_offset(),
             line_number: sunk.line_number(),
             context_kind: None,
-            matches: matches,
-            original_matches: original_matches,
+            matches,
+            original_matches,
         }
     }
 
     #[inline]
-    pub fn from_sink_context(
+    pub(crate) fn from_sink_context(
         sunk: &'a SinkContext<'a>,
         original_matches: &'a [Match],
         replacement: Option<(&'a [u8], &'a [Match])>,
@@ -212,47 +212,47 @@ impl<'a> Sunk<'a> {
         let (bytes, matches) =
             replacement.unwrap_or_else(|| (sunk.bytes(), original_matches));
         Sunk {
-            bytes: bytes,
+            bytes,
             absolute_byte_offset: sunk.absolute_byte_offset(),
             line_number: sunk.line_number(),
             context_kind: Some(sunk.kind()),
-            matches: matches,
-            original_matches: original_matches,
+            matches,
+            original_matches,
         }
     }
 
     #[inline]
-    pub fn context_kind(&self) -> Option<&'a SinkContextKind> {
+    pub(crate) fn context_kind(&self) -> Option<&'a SinkContextKind> {
         self.context_kind
     }
 
     #[inline]
-    pub fn bytes(&self) -> &'a [u8] {
+    pub(crate) fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 
     #[inline]
-    pub fn matches(&self) -> &'a [Match] {
+    pub(crate) fn matches(&self) -> &'a [Match] {
         self.matches
     }
 
     #[inline]
-    pub fn original_matches(&self) -> &'a [Match] {
+    pub(crate) fn original_matches(&self) -> &'a [Match] {
         self.original_matches
     }
 
     #[inline]
-    pub fn lines(&self, line_term: u8) -> LineIter<'a> {
+    pub(crate) fn lines(&self, line_term: u8) -> LineIter<'a> {
         LineIter::new(line_term, self.bytes())
     }
 
     #[inline]
-    pub fn absolute_byte_offset(&self) -> u64 {
+    pub(crate) fn absolute_byte_offset(&self) -> u64 {
         self.absolute_byte_offset
     }
 
     #[inline]
-    pub fn line_number(&self) -> Option<u64> {
+    pub(crate) fn line_number(&self) -> Option<u64> {
         self.line_number
     }
 }
@@ -264,11 +264,12 @@ impl<'a> Sunk<'a> {
 /// something else. This allows us to amortize work if we are printing the
 /// file path for every match.
 ///
-/// In the common case, no transformation is needed, which lets us avoid the
-/// allocation. Typically, only Windows requires a transform, since we can't
-/// access the raw bytes of a path directly and first need to lossily convert
-/// to UTF-8. Windows is also typically where the path separator replacement
-/// is used, e.g., in cygwin environments to use `/` instead of `\`.
+/// In the common case, no transformation is needed, which lets us avoid
+/// the allocation. Typically, only Windows requires a transform, since
+/// it's fraught to access the raw bytes of a path directly and first need
+/// to lossily convert to UTF-8. Windows is also typically where the path
+/// separator replacement is used, e.g., in cygwin environments to use `/`
+/// instead of `\`.
 ///
 /// Users of this type are expected to construct it from a normal `Path`
 /// found in the standard library. It can then be written to any `io::Write`
@@ -276,49 +277,87 @@ impl<'a> Sunk<'a> {
 /// portability with a small cost: on Windows, paths that are not valid UTF-16
 /// will not roundtrip correctly.
 #[derive(Clone, Debug)]
-pub struct PrinterPath<'a>(Cow<'a, [u8]>);
+pub(crate) struct PrinterPath<'a> {
+    // On Unix, we can re-materialize a `Path` from our `Cow<'a, [u8]>` with
+    // zero cost, so there's no point in storing it. At time of writing,
+    // OsStr::as_os_str_bytes (and its corresponding constructor) are not
+    // stable yet. Those would let us achieve the same end portably. (As long
+    // as we keep our UTF-8 requirement on Windows.)
+    #[cfg(not(unix))]
+    path: &'a Path,
+    bytes: Cow<'a, [u8]>,
+    hyperlink: OnceCell<Option<HyperlinkPath>>,
+}
 
 impl<'a> PrinterPath<'a> {
     /// Create a new path suitable for printing.
-    pub fn new(path: &'a Path) -> PrinterPath<'a> {
-        PrinterPath(Vec::from_path_lossy(path))
-    }
-
-    /// Create a new printer path from the given path which can be efficiently
-    /// written to a writer without allocation.
-    ///
-    /// If the given separator is present, then any separators in `path` are
-    /// replaced with it.
-    pub fn with_separator(path: &'a Path, sep: Option<u8>) -> PrinterPath<'a> {
-        let mut ppath = PrinterPath::new(path);
-        if let Some(sep) = sep {
-            ppath.replace_separator(sep);
+    pub(crate) fn new(path: &'a Path) -> PrinterPath<'a> {
+        PrinterPath {
+            #[cfg(not(unix))]
+            path,
+            // N.B. This is zero-cost on Unix and requires at least a UTF-8
+            // check on Windows. This doesn't allocate on Windows unless the
+            // path is invalid UTF-8 (which is exceptionally rare).
+            bytes: Vec::from_path_lossy(path),
+            hyperlink: OnceCell::new(),
         }
-        ppath
     }
 
-    /// Replace the path separator in this path with the given separator
-    /// and do it in place. On Windows, both `/` and `\` are treated as
-    /// path separators that are both replaced by `new_sep`. In all other
-    /// environments, only `/` is treated as a path separator.
-    fn replace_separator(&mut self, new_sep: u8) {
-        let transformed_path: Vec<u8> = self
-            .0
-            .bytes()
-            .map(|b| {
-                if b == b'/' || (cfg!(windows) && b == b'\\') {
-                    new_sep
-                } else {
-                    b
+    /// Set the separator on this path.
+    ///
+    /// When set, `PrinterPath::as_bytes` will return the path provided but
+    /// with its separator replaced with the one given.
+    pub(crate) fn with_separator(
+        mut self,
+        sep: Option<u8>,
+    ) -> PrinterPath<'a> {
+        /// Replace the path separator in this path with the given separator
+        /// and do it in place. On Windows, both `/` and `\` are treated as
+        /// path separators that are both replaced by `new_sep`. In all other
+        /// environments, only `/` is treated as a path separator.
+        fn replace_separator(bytes: &[u8], sep: u8) -> Vec<u8> {
+            let mut bytes = bytes.to_vec();
+            for b in bytes.iter_mut() {
+                if *b == b'/' || (cfg!(windows) && *b == b'\\') {
+                    *b = sep;
                 }
-            })
-            .collect();
-        self.0 = Cow::Owned(transformed_path);
+            }
+            bytes
+        }
+        let Some(sep) = sep else { return self };
+        self.bytes = Cow::Owned(replace_separator(self.as_bytes(), sep));
+        self
     }
 
     /// Return the raw bytes for this path.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Return this path as a hyperlink.
+    ///
+    /// Note that a hyperlink may not be able to be created from a path.
+    /// Namely, computing the hyperlink may require touching the file system
+    /// (e.g., for path canonicalization) and that can fail. This failure is
+    /// silent but is logged.
+    pub(crate) fn as_hyperlink(&self) -> Option<&HyperlinkPath> {
+        self.hyperlink
+            .get_or_init(|| HyperlinkPath::from_path(self.as_path()))
+            .as_ref()
+    }
+
+    /// Return this path as an actual `Path` type.
+    fn as_path(&self) -> &Path {
+        #[cfg(unix)]
+        fn imp<'p>(p: &'p PrinterPath<'_>) -> &'p Path {
+            use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+            Path::new(OsStr::from_bytes(p.as_bytes()))
+        }
+        #[cfg(not(unix))]
+        fn imp<'p>(p: &'p PrinterPath<'_>) -> &'p Path {
+            p.path
+        }
+        imp(self)
     }
 }
 
@@ -327,7 +366,7 @@ impl<'a> PrinterPath<'a> {
 /// with the Deserialize impl for std::time::Duration, since this type only
 /// adds new fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NiceDuration(pub time::Duration);
+pub(crate) struct NiceDuration(pub time::Duration);
 
 impl fmt::Display for NiceDuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -345,7 +384,7 @@ impl NiceDuration {
     }
 }
 
-#[cfg(feature = "serde1")]
+#[cfg(feature = "serde")]
 impl Serialize for NiceDuration {
     fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
@@ -358,12 +397,53 @@ impl Serialize for NiceDuration {
     }
 }
 
+/// A simple formatter for converting `u64` values to ASCII byte strings.
+///
+/// This avoids going through the formatting machinery which seems to
+/// substantially slow things down.
+///
+/// The `itoa` crate does the same thing as this formatter, but is a bit
+/// faster. We roll our own which is a bit slower, but gets us enough of a win
+/// to be satisfied with and with pure safe code.
+#[derive(Debug)]
+pub(crate) struct DecimalFormatter {
+    buf: [u8; Self::MAX_U64_LEN],
+    start: usize,
+}
+
+impl DecimalFormatter {
+    /// Discovered via `u64::MAX.to_string().len()`.
+    const MAX_U64_LEN: usize = 20;
+
+    /// Create a new decimal formatter for the given 64-bit unsigned integer.
+    pub(crate) fn new(mut n: u64) -> DecimalFormatter {
+        let mut buf = [0; Self::MAX_U64_LEN];
+        let mut i = buf.len();
+        loop {
+            i -= 1;
+
+            let digit = u8::try_from(n % 10).unwrap();
+            n /= 10;
+            buf[i] = b'0' + digit;
+            if n == 0 {
+                break;
+            }
+        }
+        DecimalFormatter { buf, start: i }
+    }
+
+    /// Return the decimal formatted as an ASCII byte string.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.buf[self.start..]
+    }
+}
+
 /// Trim prefix ASCII spaces from the given slice and return the corresponding
 /// range.
 ///
 /// This stops trimming a prefix as soon as it sees non-whitespace or a line
 /// terminator.
-pub fn trim_ascii_prefix(
+pub(crate) fn trim_ascii_prefix(
     line_term: LineTerminator,
     slice: &[u8],
     range: Match,
@@ -384,7 +464,7 @@ pub fn trim_ascii_prefix(
     range.with_start(range.start() + count)
 }
 
-pub fn find_iter_at_in_context<M, F>(
+pub(crate) fn find_iter_at_in_context<M, F>(
     searcher: &Searcher,
     matcher: M,
     mut bytes: &[u8],
@@ -444,7 +524,7 @@ where
 /// Given a buf and some bounds, if there is a line terminator at the end of
 /// the given bounds in buf, then the bounds are trimmed to remove the line
 /// terminator.
-pub fn trim_line_terminator(
+pub(crate) fn trim_line_terminator(
     searcher: &Searcher,
     buf: &[u8],
     line: &mut Match,
@@ -487,4 +567,23 @@ where
     let end = std::cmp::min(bytes.len(), range.end);
     dst.extend(&bytes[last_match..end]);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_decimal_format() {
+        let fmt = |n: u64| {
+            let bytes = DecimalFormatter::new(n).as_bytes().to_vec();
+            String::from_utf8(bytes).unwrap()
+        };
+        let std = |n: u64| n.to_string();
+
+        let ints = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 100, 123, u64::MAX];
+        for n in ints {
+            assert_eq!(std(n), fmt(n));
+        }
+    }
 }

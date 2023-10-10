@@ -29,26 +29,19 @@ jobs:
       # Set to force version number, e.g., when no tag exists.
       # RG_VERSION: TEST-0.0.0
     outputs:
-      upload_url: ${{ steps.release.outputs.upload_url }}
       rg_version: ${{ env.RG_VERSION }}
     steps:
+      - uses: actions/checkout@v3
       - name: Get the release version from the tag
         shell: bash
         if: env.RG_VERSION == ''
         run: |
-          # Apparently, this is the right way to get a tag name. Really?
-          #
-          # See: https://github.community/t5/GitHub-Actions/How-to-get-just-the-tag-name/m-p/32167/highlight/true#M1027
-          echo "RG_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          echo "RG_VERSION=$GITHUB_REF_NAME" >> $GITHUB_ENV
           echo "version is: ${{ env.RG_VERSION }}"
       - name: Create GitHub release
-        id: release
-        uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ env.RG_VERSION }}
-          release_name: ${{ env.RG_VERSION }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create ${{ env.RG_VERSION }}
 
   build-release:
     name: build-release
@@ -71,11 +64,11 @@ jobs:
         build: [linux, linux-arm, macos, win-msvc, win-gnu, win32-msvc]
         include:
         - build: linux
-          os: ubuntu-18.04
+          os: ubuntu-latest
           rust: nightly
           target: x86_64-unknown-linux-musl
         - build: linux-arm
-          os: ubuntu-18.04
+          os: ubuntu-latest
           rust: nightly
           target: arm-unknown-linux-gnueabihf
         - build: macos
@@ -83,26 +76,24 @@ jobs:
           rust: nightly
           target: x86_64-apple-darwin
         - build: win-msvc
-          os: windows-2019
+          os: windows-latest
           rust: nightly
           target: x86_64-pc-windows-msvc
         - build: win-gnu
-          os: windows-2019
+          os: windows-latest
           rust: nightly-x86_64-gnu
           target: x86_64-pc-windows-gnu
         - build: win32-msvc
-          os: windows-2019
+          os: windows-latest
           rust: nightly
           target: i686-pc-windows-msvc
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
-      with:
-        fetch-depth: 1
+      uses: actions/checkout@v3
 
     - name: Install packages (Ubuntu)
-      if: matrix.os == 'ubuntu-18.04'
+      if: matrix.os == 'ubuntu-latest'
       run: |
         ci/ubuntu-install-packages
 
@@ -112,7 +103,7 @@ jobs:
         ci/macos-install-packages
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@v1
+      uses: dtolnay/rust-toolchain@master
       with:
         toolchain: ${{ matrix.rust }}
         target: ${{ matrix.target }}
@@ -134,8 +125,8 @@ jobs:
     - name: Build release binary
       run: ${{ env.CARGO }} build --verbose --release --features pcre2 ${{ env.TARGET_FLAGS }}
 
-    - name: Strip release binary (linux and macos)
-      if: matrix.build == 'linux' || matrix.build == 'macos'
+    - name: Strip release binary (linux, macos and macos-arm)
+      if: matrix.build == 'linux' || matrix.os == 'macos'
       run: strip "target/${{ matrix.target }}/release/rg"
 
     - name: Strip release binary (arm)
@@ -159,24 +150,23 @@ jobs:
         cp "$outdir"/{rg.bash,rg.fish,_rg.ps1} "$staging/complete/"
         cp complete/_rg "$staging/complete/"
 
-        if [ "${{ matrix.os }}" = "windows-2019" ]; then
+        if [ "${{ matrix.os }}" = "windows-latest" ]; then
           cp "target/${{ matrix.target }}/release/rg.exe" "$staging/"
           7z a "$staging.zip" "$staging"
+          certutil -hashfile "$staging.zip" SHA256 > "$staging.zip.sha256"
           echo "ASSET=$staging.zip" >> $GITHUB_ENV
+          echo "ASSET_SUM=$staging.zip.sha256" >> $GITHUB_ENV
         else
           # The man page is only generated on Unix systems. ¯\_(ツ)_/¯
           cp "$outdir"/rg.1 "$staging/doc/"
           cp "target/${{ matrix.target }}/release/rg" "$staging/"
           tar czf "$staging.tar.gz" "$staging"
+          shasum -a 256 "$staging.tar.gz" > "$staging.tar.gz.sha256"
           echo "ASSET=$staging.tar.gz" >> $GITHUB_ENV
+          echo "ASSET_SUM=$staging.tar.gz.sha256" >> $GITHUB_ENV
         fi
 
     - name: Upload release archive
-      uses: actions/upload-release-asset@v1.0.1
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ${{ env.ASSET }}
-        asset_name: ${{ env.ASSET }}
-        asset_content_type: application/octet-stream
+        GH_TOKEN: ${{ github.token }}
+      run: gh release upload ${{ needs.create-release.outputs.rg_version }} ${{ env.ASSET }} ${{ env.ASSET_SUM }}

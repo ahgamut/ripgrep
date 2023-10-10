@@ -380,6 +380,7 @@ rgtest!(r428_color_context_path, |dir: Dir, mut cmd: TestCommand| {
         "-N",
         "--colors=match:none",
         "--color=always",
+        "--hyperlink-format=",
         "foo",
     ]);
 
@@ -952,6 +953,19 @@ rgtest!(r1739_replacement_lineterm_match, |dir: Dir, mut cmd: TestCommand| {
     eqnice!("af\n", cmd.stdout());
 });
 
+// See: https://github.com/BurntSushi/ripgrep/issues/1757
+rgtest!(f1757, |dir: Dir, _: TestCommand| {
+    dir.create_dir("rust/target");
+    dir.create(".ignore", "rust/target");
+    dir.create("rust/source.rs", "needle");
+    dir.create("rust/target/rustdoc-output.html", "needle");
+
+    let args = &["--files-with-matches", "needle", "rust"];
+    eqnice!("rust/source.rs\n", dir.command().args(args).stdout());
+    let args = &["--files-with-matches", "needle", "./rust"];
+    eqnice!("./rust/source.rs\n", dir.command().args(args).stdout());
+});
+
 // See: https://github.com/BurntSushi/ripgrep/issues/1765
 rgtest!(r1765, |dir: Dir, mut cmd: TestCommand| {
     dir.create("test", "\n");
@@ -1032,17 +1046,10 @@ rgtest!(r1878, |dir: Dir, _: TestCommand| {
 
 // See: https://github.com/BurntSushi/ripgrep/issues/1891
 rgtest!(r1891, |dir: Dir, mut cmd: TestCommand| {
-    // TODO: Sadly, PCRE2 has different behavior here. Not clear why. We should
-    // look into this and see if there's a fix needed at the regex engine
-    // level.
-    if dir.is_pcre2() {
-        return;
-    }
-
     dir.create("test", "\n##\n");
     // N.B. We use -o here to force the issue to occur, which seems to only
     // happen when each match needs to be detected.
-    eqnice!("1:\n2:\n2:\n", cmd.args(&["-won", "", "test"]).stdout());
+    eqnice!("1:\n2:\n2:\n2:\n", cmd.args(&["-won", "", "test"]).stdout());
 });
 
 // See: https://github.com/BurntSushi/ripgrep/issues/2095
@@ -1090,6 +1097,19 @@ b=one
     eqnice!(expected, cmd.stdout());
 });
 
+// See: https://github.com/BurntSushi/ripgrep/issues/2198
+rgtest!(r2198, |dir: Dir, mut cmd: TestCommand| {
+    dir.create(".ignore", "a");
+    dir.create(".rgignore", "b");
+    dir.create("a", "");
+    dir.create("b", "");
+    dir.create("c", "");
+
+    cmd.arg("--files").arg("--sort").arg("path");
+    eqnice!("c\n", cmd.stdout());
+    eqnice!("a\nb\nc\n", cmd.arg("--no-ignore-dot").stdout());
+});
+
 // See: https://github.com/BurntSushi/ripgrep/issues/2208
 rgtest!(r2208, |dir: Dir, mut cmd: TestCommand| {
     dir.create("test", "# Compile requirements.txt files from all found or specified requirements.in files (compile).
@@ -1125,4 +1145,53 @@ rgtest!(r2236, |dir: Dir, mut cmd: TestCommand| {
     dir.create_dir("foo");
     dir.create("foo/bar", "test\n");
     cmd.args(&["test"]).assert_err();
+});
+
+// See: https://github.com/BurntSushi/ripgrep/issues/2480
+rgtest!(r2480, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("file", "FooBar\n");
+
+    // no regression in empty pattern behavior
+    cmd.args(&["-e", "", "file"]);
+    eqnice!("FooBar\n", cmd.stdout());
+
+    // no regression in single pattern behavior
+    let mut cmd = dir.command();
+    cmd.args(&["-e", ")(", "file"]);
+    eqnice!("FooBar\n", cmd.stdout());
+
+    // no regression in multiple patterns behavior
+    let mut cmd = dir.command();
+    cmd.args(&["--only-matching", "-e", "Foo", "-e", "Bar", "file"]);
+    eqnice!("Foo\nBar\n", cmd.stdout());
+
+    // no regression in capture groups behavior
+    let mut cmd = dir.command();
+    cmd.args(&["-e", "Fo(oB)a(r)", "--replace", "${0}_${1}_${2}${3}", "file"]);
+    eqnice!("FooBar_oB_r\n", cmd.stdout()); // note: ${3} expected to be empty
+
+    // flag does not leak into next pattern on match
+    let mut cmd = dir.command();
+    cmd.args(&["--only-matching", "-e", "(?i)foo", "-e", "bar", "file"]);
+    eqnice!("Foo\n", cmd.stdout());
+
+    // flag does not leak into next pattern on mismatch
+    let mut cmd = dir.command();
+    cmd.args(&["--only-matching", "-e", "(?i)notfoo", "-e", "bar", "file"]);
+    cmd.assert_err();
+});
+
+// See: https://github.com/BurntSushi/ripgrep/issues/2574
+rgtest!(r2574, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("haystack", "some.domain.com\nsome.domain.com/x\n");
+    let got = cmd
+        .args(&[
+            "--no-filename",
+            "--no-unicode",
+            "-w",
+            "-o",
+            r"(\w+\.)*domain\.(\w+)",
+        ])
+        .stdout();
+    eqnice!("some.domain.com\nsome.domain.com\n", got);
 });

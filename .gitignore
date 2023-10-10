@@ -11,6 +11,7 @@ target
 /termcolor/Cargo.lock
 /wincolor/Cargo.lock
 /deployment
+/.idea
 
 # Snapcraft files
 stage

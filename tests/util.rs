@@ -464,19 +464,39 @@ fn dir_list<P: AsRef<Path>>(dir: P) -> Vec<String> {
 /// will have setup qemu to run it. While this is integrated into the Rust
 /// testing by default, we need to handle it ourselves for integration tests.
 ///
-/// Thankfully, cross sets an environment variable that points to the proper
-/// qemu binary that we want to run. So we just search for that env var and
-/// return its value if we could find it.
+/// Now thankfully, cross sets `CROSS_RUNNER` to point to the right qemu
+/// executable. Or so one thinks. But it seems to always be set to `qemu-user`
+/// and I cannot find `qemu-user` anywhere in the Docker image. Awesome.
+///
+/// Thers is `/linux-runner` which seems to work sometimes? But not always.
+///
+/// Instead, it looks like we have to use `qemu-aarch64` in the `aarch64`
+/// case. Perfect, so just get the current target architecture and append it
+/// to `qemu-`. Wrong. Cross (or qemu or whoever) uses `qemu-ppc64` for
+/// `powerpc64`, so we can't just use the target architecture as Rust knows
+/// it verbatim.
+///
+/// So... we just manually handle these cases. So fucking fun.
 fn cross_runner() -> Option<String> {
-    for (k, v) in std::env::vars_os() {
-        let (k, v) = (k.to_string_lossy(), v.to_string_lossy());
-        if !k.starts_with("CARGO_TARGET_") && !k.ends_with("_RUNNER") {
-            continue;
-        }
-        if !v.starts_with("qemu-") {
-            continue;
-        }
-        return Some(v.into_owned());
+    let runner = std::env::var("CROSS_RUNNER").ok()?;
+    if runner.is_empty() {
+        return None;
     }
-    None
+    if cfg!(target_arch = "powerpc64") {
+        Some("qemu-ppc64".to_string())
+    } else if cfg!(target_arch = "x86") {
+        Some("i386".to_string())
+    } else {
+        // Make a guess... Sigh.
+        Some(format!("qemu-{}", std::env::consts::ARCH))
+    }
+}
+
+/// Returns true if the test setup believes Cross is running and `qemu` is
+/// needed to run ripgrep.
+///
+/// This is useful because it has been difficult to get some tests to pass
+/// under Cross.
+pub fn is_cross() -> bool {
+    std::env::var("CROSS_RUNNER").ok().map_or(false, |v| !v.is_empty())
 }

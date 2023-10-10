@@ -1,15 +1,16 @@
-use grep_matcher::{ByteSet, LineTerminator};
-use regex::bytes::{Regex, RegexBuilder};
-use regex_syntax::ast::{self, Ast};
-use regex_syntax::hir::{self, Hir};
+use {
+    grep_matcher::{ByteSet, LineTerminator},
+    regex_automata::meta::Regex,
+    regex_syntax::{
+        ast,
+        hir::{self, Hir},
+    },
+};
 
-use crate::ast::AstAnalysis;
-use crate::crlf::crlfify;
-use crate::error::Error;
-use crate::literal::LiteralSets;
-use crate::multi::alternation_literals;
-use crate::non_matching::non_matching_bytes;
-use crate::strip::strip_from_match;
+use crate::{
+    ast::AstAnalysis, error::Error, non_matching::non_matching_bytes,
+    strip::strip_from_match,
+};
 
 /// Config represents the configuration of a regex matcher in this crate.
 /// The configuration is itself a rough combination of the knobs found in
@@ -21,21 +22,23 @@ use crate::strip::strip_from_match;
 /// configuration which generated it, and provides transformation on that HIR
 /// such that the configuration is preserved.
 #[derive(Clone, Debug)]
-pub struct Config {
-    pub case_insensitive: bool,
-    pub case_smart: bool,
-    pub multi_line: bool,
-    pub dot_matches_new_line: bool,
-    pub swap_greed: bool,
-    pub ignore_whitespace: bool,
-    pub unicode: bool,
-    pub octal: bool,
-    pub size_limit: usize,
-    pub dfa_size_limit: usize,
-    pub nest_limit: u32,
-    pub line_terminator: Option<LineTerminator>,
-    pub crlf: bool,
-    pub word: bool,
+pub(crate) struct Config {
+    pub(crate) case_insensitive: bool,
+    pub(crate) case_smart: bool,
+    pub(crate) multi_line: bool,
+    pub(crate) dot_matches_new_line: bool,
+    pub(crate) swap_greed: bool,
+    pub(crate) ignore_whitespace: bool,
+    pub(crate) unicode: bool,
+    pub(crate) octal: bool,
+    pub(crate) size_limit: usize,
+    pub(crate) dfa_size_limit: usize,
+    pub(crate) nest_limit: u32,
+    pub(crate) line_terminator: Option<LineTerminator>,
+    pub(crate) crlf: bool,
+    pub(crate) word: bool,
+    pub(crate) fixed_strings: bool,
+    pub(crate) whole_line: bool,
 }
 
 impl Default for Config {
@@ -50,47 +53,28 @@ impl Default for Config {
             unicode: true,
             octal: false,
             // These size limits are much bigger than what's in the regex
-            // crate.
+            // crate by default.
             size_limit: 100 * (1 << 20),
             dfa_size_limit: 1000 * (1 << 20),
             nest_limit: 250,
             line_terminator: None,
             crlf: false,
             word: false,
+            fixed_strings: false,
+            whole_line: false,
         }
     }
 }
 
 impl Config {
-    /// Parse the given pattern and returned its HIR expression along with
-    /// the current configuration.
-    ///
-    /// If there was a problem parsing the given expression then an error
-    /// is returned.
-    pub fn hir(&self, pattern: &str) -> Result<ConfiguredHIR, Error> {
-        let ast = self.ast(pattern)?;
-        let analysis = self.analysis(&ast)?;
-        let expr = hir::translate::TranslatorBuilder::new()
-            .allow_invalid_utf8(true)
-            .case_insensitive(self.is_case_insensitive(&analysis))
-            .multi_line(self.multi_line)
-            .dot_matches_new_line(self.dot_matches_new_line)
-            .swap_greed(self.swap_greed)
-            .unicode(self.unicode)
-            .build()
-            .translate(pattern, &ast)
-            .map_err(Error::regex)?;
-        let expr = match self.line_terminator {
-            None => expr,
-            Some(line_term) => strip_from_match(expr, line_term)?,
-        };
-        Ok(ConfiguredHIR {
-            original: pattern.to_string(),
-            config: self.clone(),
-            analysis,
-            // If CRLF mode is enabled, replace `$` with `(?:\r?$)`.
-            expr: if self.crlf { crlfify(expr) } else { expr },
-        })
+    /// Use this configuration to build an HIR from the given patterns. The HIR
+    /// returned corresponds to a single regex that is an alternation of the
+    /// patterns given.
+    pub(crate) fn build_many<P: AsRef<str>>(
+        &self,
+        patterns: &[P],
+    ) -> Result<ConfiguredHIR, Error> {
+        ConfiguredHIR::new(self.clone(), patterns)
     }
 
     /// Accounting for the `smart_case` config knob, return true if and only if
@@ -105,35 +89,55 @@ impl Config {
         analysis.any_literal() && !analysis.any_uppercase()
     }
 
-    /// Returns true if and only if this config is simple enough such that
-    /// if the pattern is a simple alternation of literals, then it can be
-    /// constructed via a plain Aho-Corasick automaton.
+    /// Returns whether the given patterns should be treated as "fixed strings"
+    /// literals. This is different from just querying the `fixed_strings` knob
+    /// in that if the knob is false, this will still return true in some cases
+    /// if the patterns are themselves indistinguishable from literals.
     ///
-    /// Note that it is OK to return true even when settings like `multi_line`
-    /// are enabled, since if multi-line can impact the match semantics of a
-    /// regex, then it is by definition not a simple alternation of literals.
-    pub fn can_plain_aho_corasick(&self) -> bool {
-        !self.word && !self.case_insensitive && !self.case_smart
-    }
-
-    /// Perform analysis on the AST of this pattern.
-    ///
-    /// This returns an error if the given pattern failed to parse.
-    fn analysis(&self, ast: &Ast) -> Result<AstAnalysis, Error> {
-        Ok(AstAnalysis::from_ast(ast))
-    }
-
-    /// Parse the given pattern into its abstract syntax.
-    ///
-    /// This returns an error if the given pattern failed to parse.
-    fn ast(&self, pattern: &str) -> Result<Ast, Error> {
-        ast::parse::ParserBuilder::new()
-            .nest_limit(self.nest_limit)
-            .octal(self.octal)
-            .ignore_whitespace(self.ignore_whitespace)
-            .build()
-            .parse(pattern)
-            .map_err(Error::regex)
+    /// The main idea here is that if this returns true, then it is safe
+    /// to build an `regex_syntax::hir::Hir` value directly from the given
+    /// patterns as an alternation of `hir::Literal` values.
+    fn is_fixed_strings<P: AsRef<str>>(&self, patterns: &[P]) -> bool {
+        // When these are enabled, we really need to parse the patterns and
+        // let them go through the standard HIR translation process in order
+        // for case folding transforms to be applied.
+        if self.case_insensitive || self.case_smart {
+            return false;
+        }
+        // Even if whole_line or word is enabled, both of those things can
+        // be implemented by wrapping the Hir generated by an alternation of
+        // fixed string literals. So for here at least, we don't care about the
+        // word or whole_line settings.
+        if self.fixed_strings {
+            // ... but if any literal contains a line terminator, then we've
+            // got to bail out because this will ultimately result in an error.
+            if let Some(lineterm) = self.line_terminator {
+                for p in patterns.iter() {
+                    if has_line_terminator(lineterm, p.as_ref()) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        // In this case, the only way we can hand construct the Hir is if none
+        // of the patterns contain meta characters. If they do, then we need to
+        // send them through the standard parsing/translation process.
+        for p in patterns.iter() {
+            let p = p.as_ref();
+            if p.chars().any(regex_syntax::is_meta_character) {
+                return false;
+            }
+            // Same deal as when fixed_strings is set above. If the pattern has
+            // a line terminator anywhere, then we need to bail out and let
+            // an error occur.
+            if let Some(lineterm) = self.line_terminator {
+                if has_line_terminator(lineterm, p) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 
@@ -149,170 +153,203 @@ impl Config {
 /// size limits set on the configured HIR will be propagated out to any
 /// subsequently constructed HIR or regular expression.
 #[derive(Clone, Debug)]
-pub struct ConfiguredHIR {
-    original: String,
+pub(crate) struct ConfiguredHIR {
     config: Config,
-    analysis: AstAnalysis,
-    expr: Hir,
+    hir: Hir,
 }
 
 impl ConfiguredHIR {
-    /// Return the configuration for this HIR expression.
-    pub fn config(&self) -> &Config {
+    /// Parse the given patterns into a single HIR expression that represents
+    /// an alternation of the patterns given.
+    fn new<P: AsRef<str>>(
+        config: Config,
+        patterns: &[P],
+    ) -> Result<ConfiguredHIR, Error> {
+        let hir = if config.is_fixed_strings(patterns) {
+            let mut alts = vec![];
+            for p in patterns.iter() {
+                alts.push(Hir::literal(p.as_ref().as_bytes()));
+            }
+            log::debug!(
+                "assembling HIR from {} fixed string literals",
+                alts.len()
+            );
+            let hir = Hir::alternation(alts);
+            hir
+        } else {
+            let mut alts = vec![];
+            for p in patterns.iter() {
+                alts.push(if config.fixed_strings {
+                    format!("(?:{})", regex_syntax::escape(p.as_ref()))
+                } else {
+                    format!("(?:{})", p.as_ref())
+                });
+            }
+            let pattern = alts.join("|");
+            let ast = ast::parse::ParserBuilder::new()
+                .nest_limit(config.nest_limit)
+                .octal(config.octal)
+                .ignore_whitespace(config.ignore_whitespace)
+                .build()
+                .parse(&pattern)
+                .map_err(Error::generic)?;
+            let analysis = AstAnalysis::from_ast(&ast);
+            let mut hir = hir::translate::TranslatorBuilder::new()
+                .utf8(false)
+                .case_insensitive(config.is_case_insensitive(&analysis))
+                .multi_line(config.multi_line)
+                .dot_matches_new_line(config.dot_matches_new_line)
+                .crlf(config.crlf)
+                .swap_greed(config.swap_greed)
+                .unicode(config.unicode)
+                .build()
+                .translate(&pattern, &ast)
+                .map_err(Error::generic)?;
+            // We don't need to do this for the fixed-strings case above
+            // because is_fixed_strings will return false if any pattern
+            // contains a line terminator. Therefore, we don't need to strip
+            // it.
+            //
+            // We go to some pains to avoid doing this in the fixed-strings
+            // case because this can result in building a new HIR when ripgrep
+            // is given a huge set of literals to search for. And this can
+            // actually take a little time. It's not huge, but it's noticeable.
+            hir = match config.line_terminator {
+                None => hir,
+                Some(line_term) => strip_from_match(hir, line_term)?,
+            };
+            hir
+        };
+        Ok(ConfiguredHIR { config, hir })
+    }
+
+    /// Return a reference to the underlying configuration.
+    pub(crate) fn config(&self) -> &Config {
         &self.config
     }
 
-    /// Compute the set of non-matching bytes for this HIR expression.
-    pub fn non_matching_bytes(&self) -> ByteSet {
-        non_matching_bytes(&self.expr)
+    /// Return a reference to the underyling HIR.
+    pub(crate) fn hir(&self) -> &Hir {
+        &self.hir
     }
 
-    /// Returns true if and only if this regex needs to have its match offsets
-    /// tweaked because of CRLF support. Specifically, this occurs when the
-    /// CRLF hack is enabled and the regex is line anchored at the end. In
-    /// this case, matches that end with a `\r` have the `\r` stripped.
-    pub fn needs_crlf_stripped(&self) -> bool {
-        self.config.crlf && self.expr.is_line_anchored_end()
+    /// Convert this HIR to a regex that can be used for matching.
+    pub(crate) fn to_regex(&self) -> Result<Regex, Error> {
+        let meta = Regex::config()
+            .utf8_empty(false)
+            .nfa_size_limit(Some(self.config.size_limit))
+            // We don't expose a knob for this because the one-pass DFA is
+            // usually not a perf bottleneck for ripgrep. But we give it some
+            // extra room than the default.
+            .onepass_size_limit(Some(10 * (1 << 20)))
+            // Same deal here. The default limit for full DFAs is VERY small,
+            // but with ripgrep we can afford to spend a bit more time on
+            // building them I think.
+            .dfa_size_limit(Some(1 * (1 << 20)))
+            .dfa_state_limit(Some(1_000))
+            .hybrid_cache_capacity(self.config.dfa_size_limit);
+        Regex::builder()
+            .configure(meta)
+            .build_from_hir(&self.hir)
+            .map_err(Error::regex)
+    }
+
+    /// Compute the set of non-matching bytes for this HIR expression.
+    pub(crate) fn non_matching_bytes(&self) -> ByteSet {
+        non_matching_bytes(&self.hir)
     }
 
     /// Returns the line terminator configured on this expression.
     ///
     /// When we have beginning/end anchors (NOT line anchors), the fast line
-    /// searching path isn't quite correct. Or at least, doesn't match the
-    /// slow path. Namely, the slow path strips line terminators while the
-    /// fast path does not. Since '$' (when multi-line mode is disabled)
-    /// doesn't match at line boundaries, the existence of a line terminator
-    /// might cause it to not match when it otherwise would with the line
-    /// terminator stripped.
+    /// searching path isn't quite correct. Or at least, doesn't match the slow
+    /// path. Namely, the slow path strips line terminators while the fast path
+    /// does not. Since '$' (when multi-line mode is disabled) doesn't match at
+    /// line boundaries, the existence of a line terminator might cause it to
+    /// not match when it otherwise would with the line terminator stripped.
     ///
-    /// Since searching with text anchors is exceptionally rare in the
-    /// context of line oriented searching (multi-line mode is basically
-    /// always enabled), we just disable this optimization when there are
-    /// text anchors. We disable it by not returning a line terminator, since
+    /// Since searching with text anchors is exceptionally rare in the context
+    /// of line oriented searching (multi-line mode is basically always
+    /// enabled), we just disable this optimization when there are text
+    /// anchors. We disable it by not returning a line terminator, since
     /// without a line terminator, the fast search path can't be executed.
     ///
+    /// Actually, the above is no longer quite correct. Later on, another
+    /// optimization was added where if the line terminator was in the set of
+    /// bytes that was guaranteed to never be part of a match, then the higher
+    /// level search infrastructure assumes that the fast line-by-line search
+    /// path can still be taken. This optimization applies when multi-line
+    /// search (not multi-line mode) is enabled. In that case, there is no
+    /// configured line terminator since the regex is permitted to match a
+    /// line terminator. But if the regex is guaranteed to never match across
+    /// multiple lines despite multi-line search being requested, we can still
+    /// do the faster and more flexible line-by-line search. This is why the
+    /// non-matching extraction routine removes `\n` when `\A` and `\z` are
+    /// present even though that's not quite correct...
+    ///
     /// See: <https://github.com/BurntSushi/ripgrep/issues/2260>
-    pub fn line_terminator(&self) -> Option<LineTerminator> {
-        if self.is_any_anchored() {
+    pub(crate) fn line_terminator(&self) -> Option<LineTerminator> {
+        if self.hir.properties().look_set().contains_anchor_haystack() {
             None
         } else {
             self.config.line_terminator
         }
     }
 
-    /// Returns true if and only if the underlying HIR has any text anchors.
-    fn is_any_anchored(&self) -> bool {
-        self.expr.is_any_anchored_start() || self.expr.is_any_anchored_end()
+    /// Turns this configured HIR into an equivalent one, but where it must
+    /// match at the start and end of a line.
+    pub(crate) fn into_whole_line(self) -> ConfiguredHIR {
+        let line_anchor_start = Hir::look(self.line_anchor_start());
+        let line_anchor_end = Hir::look(self.line_anchor_end());
+        let hir =
+            Hir::concat(vec![line_anchor_start, self.hir, line_anchor_end]);
+        ConfiguredHIR { config: self.config, hir }
     }
 
-    /// Builds a regular expression from this HIR expression.
-    pub fn regex(&self) -> Result<Regex, Error> {
-        self.pattern_to_regex(&self.expr.to_string())
+    /// Turns this configured HIR into an equivalent one, but where it must
+    /// match at word boundaries.
+    pub(crate) fn into_word(self) -> ConfiguredHIR {
+        let hir = Hir::concat(vec![
+            Hir::look(if self.config.unicode {
+                hir::Look::WordStartHalfUnicode
+            } else {
+                hir::Look::WordStartHalfAscii
+            }),
+            self.hir,
+            Hir::look(if self.config.unicode {
+                hir::Look::WordEndHalfUnicode
+            } else {
+                hir::Look::WordEndHalfAscii
+            }),
+        ]);
+        ConfiguredHIR { config: self.config, hir }
     }
 
-    /// If this HIR corresponds to an alternation of literals with no
-    /// capturing groups, then this returns those literals.
-    pub fn alternation_literals(&self) -> Option<Vec<Vec<u8>>> {
-        if !self.config.can_plain_aho_corasick() {
-            return None;
-        }
-        alternation_literals(&self.expr)
-    }
-
-    /// Applies the given function to the concrete syntax of this HIR and then
-    /// generates a new HIR based on the result of the function in a way that
-    /// preserves the configuration.
-    ///
-    /// For example, this can be used to wrap a user provided regular
-    /// expression with additional semantics. e.g., See the `WordMatcher`.
-    pub fn with_pattern<F: FnMut(&str) -> String>(
-        &self,
-        mut f: F,
-    ) -> Result<ConfiguredHIR, Error> {
-        self.pattern_to_hir(&f(&self.expr.to_string()))
-    }
-
-    /// If the current configuration has a line terminator set and if useful
-    /// literals could be extracted, then a regular expression matching those
-    /// literals is returned. If no line terminator is set, then `None` is
-    /// returned.
-    ///
-    /// If compiling the resulting regular expression failed, then an error
-    /// is returned.
-    ///
-    /// This method only returns something when a line terminator is set
-    /// because matches from this regex are generally candidates that must be
-    /// confirmed before reporting a match. When performing a line oriented
-    /// search, confirmation is easy: just extend the candidate match to its
-    /// respective line boundaries and then re-search that line for a full
-    /// match. This only works when the line terminator is set because the line
-    /// terminator setting guarantees that the regex itself can never match
-    /// through the line terminator byte.
-    pub fn fast_line_regex(&self) -> Result<Option<Regex>, Error> {
-        if self.config.line_terminator.is_none() {
-            return Ok(None);
-        }
-        match LiteralSets::new(&self.expr).one_regex(self.config.word) {
-            None => Ok(None),
-            Some(pattern) => self.pattern_to_regex(&pattern).map(Some),
+    /// Returns the "start line" anchor for this configuration.
+    fn line_anchor_start(&self) -> hir::Look {
+        if self.config.crlf {
+            hir::Look::StartCRLF
+        } else {
+            hir::Look::StartLF
         }
     }
 
-    /// Create a regex from the given pattern using this HIR's configuration.
-    fn pattern_to_regex(&self, pattern: &str) -> Result<Regex, Error> {
-        // The settings we explicitly set here are intentionally a subset
-        // of the settings we have. The key point here is that our HIR
-        // expression is computed with the settings in mind, such that setting
-        // them here could actually lead to unintended behavior. For example,
-        // consider the pattern `(?U)a+`. This will get folded into the HIR
-        // as a non-greedy repetition operator which will in turn get printed
-        // to the concrete syntax as `a+?`, which is correct. But if we
-        // set the `swap_greed` option again, then we'll wind up with `(?U)a+?`
-        // which is equal to `a+` which is not the same as what we were given.
-        //
-        // We also don't need to apply `case_insensitive` since this gets
-        // folded into the HIR and would just cause us to do redundant work.
-        //
-        // Finally, we don't need to set `ignore_whitespace` since the concrete
-        // syntax emitted by the HIR printer never needs it.
-        //
-        // We set the rest of the options. Some of them are important, such as
-        // the size limit, and some of them are necessary to preserve the
-        // intention of the original pattern. For example, the Unicode flag
-        // will impact how the WordMatcher functions, namely, whether its
-        // word boundaries are Unicode aware or not.
-        RegexBuilder::new(&pattern)
-            .nest_limit(self.config.nest_limit)
-            .octal(self.config.octal)
-            .multi_line(self.config.multi_line)
-            .dot_matches_new_line(self.config.dot_matches_new_line)
-            .unicode(self.config.unicode)
-            .size_limit(self.config.size_limit)
-            .dfa_size_limit(self.config.dfa_size_limit)
-            .build()
-            .map_err(Error::regex)
+    /// Returns the "end line" anchor for this configuration.
+    fn line_anchor_end(&self) -> hir::Look {
+        if self.config.crlf {
+            hir::Look::EndCRLF
+        } else {
+            hir::Look::EndLF
+        }
     }
+}
 
-    /// Create an HIR expression from the given pattern using this HIR's
-    /// configuration.
-    fn pattern_to_hir(&self, pattern: &str) -> Result<ConfiguredHIR, Error> {
-        // See `pattern_to_regex` comment for explanation of why we only set
-        // a subset of knobs here. e.g., `swap_greed` is explicitly left out.
-        let expr = ::regex_syntax::ParserBuilder::new()
-            .nest_limit(self.config.nest_limit)
-            .octal(self.config.octal)
-            .allow_invalid_utf8(true)
-            .multi_line(self.config.multi_line)
-            .dot_matches_new_line(self.config.dot_matches_new_line)
-            .unicode(self.config.unicode)
-            .build()
-            .parse(pattern)
-            .map_err(Error::regex)?;
-        Ok(ConfiguredHIR {
-            original: self.original.clone(),
-            config: self.config.clone(),
-            analysis: self.analysis.clone(),
-            expr,
-        })
+/// Returns true if the given literal string contains any byte from the line
+/// terminator given.
+fn has_line_terminator(lineterm: LineTerminator, literal: &str) -> bool {
+    if lineterm.is_crlf() {
+        literal.as_bytes().iter().copied().any(|b| b == b'\r' || b == b'\n')
+    } else {
+        literal.as_bytes().iter().copied().any(|b| b == lineterm.as_byte())
     }
 }

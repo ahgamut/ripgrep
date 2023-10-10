@@ -2,4 +2,4 @@
 
 mkdir -p stage
 cp ../../ubuntu-install-packages ./stage/
-docker build -t burntsushi/cross:arm-unknown-linux-gnueabihf .
+docker build -t burntsushi/cross:powerpc64-unknown-linux-gnu .

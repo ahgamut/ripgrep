@@ -1,6 +1,6 @@
 [package]
 name = "globset"
-version = "0.4.9"  #:version
+version = "0.4.13"  #:version
 authors = ["Andrew Gallant <jamslam@gmail.com>"]
 description = """
 Cross platform single glob and glob set matching. Glob set matching is the
@@ -13,26 +13,35 @@ repository = "https://github.com/BurntSushi/ripgrep/tree/master/crates/globset"
 readme = "README.md"
 keywords = ["regex", "glob", "multiple", "set", "pattern"]
 license = "Unlicense OR MIT"
-edition = "2018"
+edition = "2021"
 
 [lib]
 name = "globset"
 bench = false
 
 [dependencies]
-aho-corasick = "0.7.3"
-bstr = { version = "0.2.0", default-features = false, features = ["std"] }
-fnv = "1.0.6"
-log = { version = "0.4.5", optional = true }
-regex = { version = "1.1.5", default-features = false, features = ["perf", "std"] }
-serde = { version = "1.0.104", optional = true }
+aho-corasick = "1.1.1"
+bstr = { version = "1.6.2", default-features = false, features = ["std"] }
+log = { version = "0.4.20", optional = true }
+serde = { version = "1.0.188", optional = true }
+
+[dependencies.regex-syntax]
+version = "0.8.0"
+default-features = false
+features = ["std"]
+
+[dependencies.regex-automata]
+version = "0.4.0"
+default-features = false
+features = ["std", "perf", "syntax", "meta", "nfa", "hybrid"]
 
 [dev-dependencies]
-glob = "0.3.0"
-lazy_static = "1"
-serde_json = "1.0.45"
+glob = "0.3.1"
+serde_json = "1.0.107"
 
 [features]
 default = ["log"]
+# DEPRECATED. It is a no-op. SIMD is done automatically through runtime
+# dispatch.
 simd-accel = []
 serde1 = ["serde"]

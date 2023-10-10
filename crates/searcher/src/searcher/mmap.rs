@@ -1,5 +1,4 @@
-use std::fs::File;
-use std::path::Path;
+use std::{fs::File, path::Path};
 
 use memmap::Mmap;
 
@@ -69,16 +68,6 @@ impl MmapChoice {
         path: Option<&Path>,
     ) -> Option<Mmap> {
         if !self.is_enabled() {
-            return None;
-        }
-        if !cfg!(target_pointer_width = "64") {
-            // For 32-bit systems, it looks like mmap will succeed even if it
-            // can't address the entire file. This seems to happen at least on
-            // Windows, even though it uses to work prior to ripgrep 13. The
-            // only Windows-related change in ripgrep 13, AFAIK, was statically
-            // linking vcruntime. So maybe that's related? But I'm not sure.
-            //
-            // See: https://github.com/BurntSushi/ripgrep/issues/1911
             return None;
         }
         if cfg!(target_os = "macos") {

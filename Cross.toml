@@ -4,8 +4,11 @@ image = "burntsushi/cross:x86_64-unknown-linux-musl"
 [target.i686-unknown-linux-gnu]
 image = "burntsushi/cross:i686-unknown-linux-gnu"
 
-[target.mips64-unknown-linux-gnuabi64]
-image = "burntsushi/cross:mips64-unknown-linux-gnuabi64"
+[target.aarch64-unknown-linux-gnu]
+image = "burntsushi/cross:aarch64-unknown-linux-gnu"
 
-[target.arm-unknown-linux-gnueabihf]
-image = "burntsushi/cross:arm-unknown-linux-gnueabihf"
+[target.powerpc64-unknown-linux-gnu]
+image = "burntsushi/cross:powerpc64-unknown-linux-gnu"
+
+[target.s390x-unknown-linux-gnu]
+image = "burntsushi/cross:s390x-unknown-linux-gnu"

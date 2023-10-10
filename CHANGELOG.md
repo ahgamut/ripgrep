@@ -2,14 +2,58 @@ TBD
 ===
 Unreleased changes. Release notes have not yet been written.
 
+**BREAKING CHANGES**
+
+* `rg -C1 -A2` used to be equivalent to `rg -A2`, but now it is equivalent to
+  `rg -B1 -A2`. That is, `-A` and `-B` no longer completely override `-C`.
+  Instead, they only partially override `-C`.
+
+Performance improvements:
+
+* [PERF #1760](https://github.com/BurntSushi/ripgrep/issues/1760):
+  Make most searches with `\b` look-arounds (among others) much faster.
+* [PERF #2591](https://github.com/BurntSushi/ripgrep/pull/2591):
+  Parallel directory traversal now uses work stealing for faster searches.
+
+Feature enhancements:
+
+* Added or improved file type filtering for Ada, DITA, Elixir, Fuchsia, Gentoo,
+  Gradle, GraphQL, Markdown, Prolog, Raku, TypeScript, USD, V
+* [FEATURE #1790](https://github.com/BurntSushi/ripgrep/issues/1790):
+  Add new `--stop-on-nonmatch` flag.
+* [FEATURE #2195](https://github.com/BurntSushi/ripgrep/issues/2195):
+  When `extra-verbose` mode is enabled in zsh, show extra file type info.
+* [FEATURE #2409](https://github.com/BurntSushi/ripgrep/pull/2409):
+  Added installation instructions for `winget`.
+
 Bug fixes:
 
+* [BUG #1275](https://github.com/BurntSushi/ripgrep/issues/1275):
+  Fix bug with `\b` assertion in the regex engine.
+* [BUG #1757](https://github.com/BurntSushi/ripgrep/issues/1757):
+  Fix bug when searching a sub-directory didn't have ignores applied correctly.
 * [BUG #1891](https://github.com/BurntSushi/ripgrep/issues/1891):
   Fix bug when using `-w` with a regex that can match the empty string.
 * [BUG #1911](https://github.com/BurntSushi/ripgrep/issues/1911):
   Disable mmap searching in all non-64-bit environments.
+* [BUG #2108](https://github.com/BurntSushi/ripgrep/issues/2108):
+  Improve docs for `-r/--replace` syntax.
+* [BUG #2198](https://github.com/BurntSushi/ripgrep/issues/2198):
+  Fix bug where `--no-ignore-dot` would not ignore `.rgignore`.
+* [BUG #2288](https://github.com/BurntSushi/ripgrep/issues/2288):
+  `-A` and `-B` now only each partially override `-C`.
 * [BUG #2236](https://github.com/BurntSushi/ripgrep/issues/2236):
   Fix gitignore parsing bug where a trailing `\/` resulted in an error.
+* [BUG #2243](https://github.com/BurntSushi/ripgrep/issues/2243):
+  Fix `--sort` flag for values other than `path`.
+* [BUG #2480](https://github.com/BurntSushi/ripgrep/issues/2480):
+  Fix bug when using inline regex flags with `-e/--regexp`.
+* [BUG #2523](https://github.com/BurntSushi/ripgrep/issues/2523):
+  Make executable searching take `.com` into account on Windows.
+* [BUG #2574](https://github.com/BurntSushi/ripgrep/issues/2574):
+  Fix bug in `-w/--word-regexp` that would result in incorrect match offsets.
+* [BUG #2623](https://github.com/BurntSushi/ripgrep/issues/2623):
+  Fix a number of bugs with the `-w/--word-regexp` flag.
 
 
 13.0.0 (2021-06-12)

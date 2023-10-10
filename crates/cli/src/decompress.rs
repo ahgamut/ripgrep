@@ -1,8 +1,10 @@
-use std::ffi::{OsStr, OsString};
-use std::fs::File;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    ffi::{OsStr, OsString},
+    fs::File,
+    io,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -18,7 +20,7 @@ pub struct DecompressionMatcherBuilder {
 }
 
 /// A representation of a single command for decompressing data
-/// out-of-proccess.
+/// out-of-process.
 #[derive(Clone, Debug)]
 struct DecompressionCommand {
     /// The glob that matches this command.
@@ -132,7 +134,7 @@ impl DecompressionMatcherBuilder {
         A: AsRef<OsStr>,
     {
         let glob = glob.to_string();
-        let bin = resolve_binary(Path::new(program.as_ref()))?;
+        let bin = try_resolve_binary(Path::new(program.as_ref()))?;
         let args =
             args.into_iter().map(|a| a.as_ref().to_os_string()).collect();
         self.commands.push(DecompressionCommand { glob, bin, args });
@@ -161,7 +163,7 @@ impl DecompressionMatcher {
     /// Create a new matcher with default rules.
     ///
     /// To add more matching rules, build a matcher with
-    /// [`DecompressionMatcherBuilder`](struct.DecompressionMatcherBuilder.html).
+    /// [`DecompressionMatcherBuilder`].
     pub fn new() -> DecompressionMatcher {
         DecompressionMatcherBuilder::new()
             .build()
@@ -221,9 +223,8 @@ impl DecompressionReaderBuilder {
         path: P,
     ) -> Result<DecompressionReader, CommandError> {
         let path = path.as_ref();
-        let mut cmd = match self.matcher.command(path) {
-            None => return DecompressionReader::new_passthru(path),
-            Some(cmd) => cmd,
+        let Some(mut cmd) = self.matcher.command(path) else {
+            return DecompressionReader::new_passthru(path);
         };
         cmd.arg(path);
 
@@ -302,9 +303,7 @@ impl DecompressionReaderBuilder {
 /// The default matching rules are probably good enough for most cases, and if
 /// they require revision, pull requests are welcome. In cases where they must
 /// be changed or extended, they can be customized through the use of
-/// [`DecompressionMatcherBuilder`](struct.DecompressionMatcherBuilder.html)
-/// and
-/// [`DecompressionReaderBuilder`](struct.DecompressionReaderBuilder.html).
+/// [`DecompressionMatcherBuilder`] and [`DecompressionReaderBuilder`].
 ///
 /// By default, this reader will asynchronously read the processes' stderr.
 /// This prevents subtle deadlocking bugs for noisy processes that write a lot
@@ -320,15 +319,14 @@ impl DecompressionReaderBuilder {
 /// matcher.
 ///
 /// ```no_run
-/// use std::io::Read;
-/// use std::process::Command;
+/// use std::{io::Read, process::Command};
+///
 /// use grep_cli::DecompressionReader;
 ///
-/// # fn example() -> Result<(), Box<::std::error::Error>> {
 /// let mut rdr = DecompressionReader::new("/usr/share/man/man1/ls.1.gz")?;
 /// let mut contents = vec![];
 /// rdr.read_to_end(&mut contents)?;
-/// # Ok(()) }
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug)]
 pub struct DecompressionReader {
@@ -347,9 +345,7 @@ impl DecompressionReader {
     ///
     /// This uses the default matching rules for determining how to decompress
     /// the given file. To change those matching rules, use
-    /// [`DecompressionReaderBuilder`](struct.DecompressionReaderBuilder.html)
-    /// and
-    /// [`DecompressionMatcherBuilder`](struct.DecompressionMatcherBuilder.html).
+    /// [`DecompressionReaderBuilder`] and [`DecompressionMatcherBuilder`].
     ///
     /// When creating readers for many paths. it is better to use the builder
     /// since it will amortize the cost of constructing the matcher.
@@ -422,29 +418,51 @@ impl io::Read for DecompressionReader {
 pub fn resolve_binary<P: AsRef<Path>>(
     prog: P,
 ) -> Result<PathBuf, CommandError> {
+    if !cfg!(windows) {
+        return Ok(prog.as_ref().to_path_buf());
+    }
+    try_resolve_binary(prog)
+}
+
+/// Resolves a path to a program to a path by searching for the program in
+/// `PATH`.
+///
+/// If the program could not be resolved, then an error is returned.
+///
+/// The purpose of doing this instead of passing the path to the program
+/// directly to Command::new is that Command::new will hand relative paths
+/// to CreateProcess on Windows, which will implicitly search the current
+/// working directory for the executable. This could be undesirable for
+/// security reasons. e.g., running ripgrep with the -z/--search-zip flag on an
+/// untrusted directory tree could result in arbitrary programs executing on
+/// Windows.
+///
+/// Note that this could still return a relative path if PATH contains a
+/// relative path. We permit this since it is assumed that the user has set
+/// this explicitly, and thus, desires this behavior.
+///
+/// If `check_exists` is false or the path is already an absolute path this
+/// will return immediately.
+fn try_resolve_binary<P: AsRef<Path>>(
+    prog: P,
+) -> Result<PathBuf, CommandError> {
     use std::env;
 
     fn is_exe(path: &Path) -> bool {
-        let md = match path.metadata() {
-            Err(_) => return false,
-            Ok(md) => md,
-        };
+        let Ok(md) = path.metadata() else { return false };
         !md.is_dir()
     }
 
     let prog = prog.as_ref();
-    if !cfg!(windows) || prog.is_absolute() {
+    if prog.is_absolute() {
         return Ok(prog.to_path_buf());
     }
-    let syspaths = match env::var_os("PATH") {
-        Some(syspaths) => syspaths,
-        None => {
-            let msg = "system PATH environment variable not found";
-            return Err(CommandError::io(io::Error::new(
-                io::ErrorKind::Other,
-                msg,
-            )));
-        }
+    let Some(syspaths) = env::var_os("PATH") else {
+        let msg = "system PATH environment variable not found";
+        return Err(CommandError::io(io::Error::new(
+            io::ErrorKind::Other,
+            msg,
+        )));
     };
     for syspath in env::split_paths(&syspaths) {
         if syspath.as_os_str().is_empty() {
@@ -455,9 +473,11 @@ pub fn resolve_binary<P: AsRef<Path>>(
             return Ok(abs_prog.to_path_buf());
         }
         if abs_prog.extension().is_none() {
-            let abs_prog = abs_prog.with_extension("exe");
-            if is_exe(&abs_prog) {
-                return Ok(abs_prog.to_path_buf());
+            for extension in ["com", "exe"] {
+                let abs_prog = abs_prog.with_extension(extension);
+                if is_exe(&abs_prog) {
+                    return Ok(abs_prog.to_path_buf());
+                }
             }
         }
     }

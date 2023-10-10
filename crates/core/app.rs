@@ -10,7 +10,6 @@
 // it into a ripgrep-specific configuration type that is not coupled with clap.
 
 use clap::{self, crate_authors, crate_version, App, AppSettings};
-use lazy_static::lazy_static;
 
 const ABOUT: &str = "
 ripgrep (rg) recursively searches the current directory for a regex pattern.
@@ -47,18 +46,19 @@ OPTIONS:
 
 /// Build a clap application parameterized by usage strings.
 pub fn app() -> App<'static, 'static> {
+    use std::sync::OnceLock;
+
     // We need to specify our version in a static because we've painted clap
     // into a corner. We've told it that every string we give it will be
     // 'static, but we need to build the version string dynamically. We can
     // fake the 'static lifetime with lazy_static.
-    lazy_static! {
-        static ref LONG_VERSION: String = long_version(None, true);
-    }
+    static LONG_VERSION: OnceLock<String> = OnceLock::new();
+    let long_version = LONG_VERSION.get_or_init(|| long_version(None, true));
 
     let mut app = App::new("ripgrep")
         .author(crate_authors!())
         .version(crate_version!())
-        .long_version(LONG_VERSION.as_str())
+        .long_version(long_version.as_str())
         .about(ABOUT)
         .max_term_width(100)
         .setting(AppSettings::UnifiedHelpMessage)
@@ -580,6 +580,8 @@ pub fn all_args_and_flags() -> Vec<RGArg> {
     flag_glob_case_insensitive(&mut args);
     flag_heading(&mut args);
     flag_hidden(&mut args);
+    flag_hostname_bin(&mut args);
+    flag_hyperlink_format(&mut args);
     flag_iglob(&mut args);
     flag_ignore_case(&mut args);
     flag_ignore_file(&mut args);
@@ -632,6 +634,7 @@ pub fn all_args_and_flags() -> Vec<RGArg> {
     flag_sort(&mut args);
     flag_sortr(&mut args);
     flag_stats(&mut args);
+    flag_stop_on_nonmatch(&mut args);
     flag_text(&mut args);
     flag_threads(&mut args);
     flag_trim(&mut args);
@@ -698,7 +701,7 @@ fn flag_after_context(args: &mut Vec<RGArg>) {
         "\
 Show NUM lines after each match.
 
-This overrides the --context and --passthru flags.
+This overrides the --passthru flag and partially overrides --context.
 "
     );
     let arg = RGArg::flag("after-context", "NUM")
@@ -706,8 +709,7 @@ This overrides the --context and --passthru flags.
         .help(SHORT)
         .long_help(LONG)
         .number()
-        .overrides("passthru")
-        .overrides("context");
+        .overrides("passthru");
     args.push(arg);
 }
 
@@ -768,7 +770,7 @@ fn flag_before_context(args: &mut Vec<RGArg>) {
         "\
 Show NUM lines before each match.
 
-This overrides the --context and --passthru flags.
+This overrides the --passthru flag and partially overrides --context.
 "
     );
     let arg = RGArg::flag("before-context", "NUM")
@@ -776,8 +778,7 @@ This overrides the --context and --passthru flags.
         .help(SHORT)
         .long_help(LONG)
         .number()
-        .overrides("passthru")
-        .overrides("context");
+        .overrides("passthru");
     args.push(arg);
 }
 
@@ -1009,8 +1010,7 @@ fn flag_context(args: &mut Vec<RGArg>) {
 Show NUM lines before and after each match. This is equivalent to providing
 both the -B/--before-context and -A/--after-context flags with the same value.
 
-This overrides both the -B/--before-context and -A/--after-context flags,
-in addition to the --passthru flag.
+This overrides the --passthru flag.
 "
     );
     let arg = RGArg::flag("context", "NUM")
@@ -1018,9 +1018,7 @@ in addition to the --passthru flag.
         .help(SHORT)
         .long_help(LONG)
         .number()
-        .overrides("passthru")
-        .overrides("before-context")
-        .overrides("after-context");
+        .overrides("passthru");
     args.push(arg);
 }
 
@@ -1498,6 +1496,111 @@ This flag can be disabled with --no-hidden.
     args.push(arg);
 }
 
+fn flag_hostname_bin(args: &mut Vec<RGArg>) {
+    const SHORT: &str = "Run a program to get this system's hostname.";
+    const LONG: &str = long!(
+        "\
+This flag controls how ripgrep determines this system's hostname. The flag's
+value should correspond to an executable (either a path or something that can
+be found via your system's *PATH* environment variable). When set, ripgrep will
+run this executable, with no arguments, and treat its output (with leading and
+trailing whitespace stripped) as your system's hostname.
+
+When not set (the default, or the empty string), ripgrep will try to
+automatically detect your system's hostname. On Unix, this corresponds
+to calling *gethostname*. On Windows, this corresponds to calling
+*GetComputerNameExW* to fetch the system's \"physical DNS hostname.\"
+
+ripgrep uses your system's hostname for producing hyperlinks.
+"
+    );
+    let arg =
+        RGArg::flag("hostname-bin", "COMMAND").help(SHORT).long_help(LONG);
+    args.push(arg);
+}
+
+fn flag_hyperlink_format(args: &mut Vec<RGArg>) {
+    const SHORT: &str = "Set the format of hyperlinks to match results.";
+    const LONG: &str = long!(
+        "\
+Set the format of hyperlinks to match results. Hyperlinks make certain elements
+of ripgrep's output, such as file paths, clickable. This generally only works
+in terminal emulators that support OSC-8 hyperlinks. For example, the format
+file://{host}{path} will emit an RFC 8089 hyperlink. To see the format that
+ripgrep is using, pass the --debug flag.
+
+Alternatively, a format string may correspond to one of the following aliases:
+default, file, grep+, kitty, macvim, none, textmate, vscode, vscode-insiders,
+vscodium. The alias will be replaced with a format string that is intended to
+work for the corresponding application.
+
+The following variables are available in the format string:
+
+{path}: Required. This is replaced with a path to a matching file. The
+path is guaranteed to be absolute and percent encoded such that it is valid to
+put into a URI. Note that a path is guaranteed to start with a /.
+
+{host}: Optional. This is replaced with your system's hostname. On Unix,
+this corresponds to calling 'gethostname'. On Windows, this corresponds to
+calling 'GetComputerNameExW' to fetch the system's \"physical DNS hostname.\"
+Alternatively, if --hostname-bin was provided, then the hostname returned from
+the output of that program will be returned. If no hostname could be found,
+then this variable is replaced with the empty string.
+
+{line}: Optional. If appropriate, this is replaced with the line number of
+a match. If no line number is available (for example, if --no-line-number was
+given), then it is automatically replaced with the value 1.
+
+{column}: Optional, but requires the presence of {line}. If appropriate, this
+is replaced with the column number of a match. If no column number is available
+(for example, if --no-column was given), then it is automatically replaced with
+the value 1.
+
+{wslprefix}: Optional. This is a special value that is set to
+wsl$/WSL_DISTRO_NAME, where WSL_DISTRO_NAME corresponds to the value of
+the equivalent environment variable. If the system is not Unix or if the
+WSL_DISTRO_NAME environment variable is not set, then this is replaced with the
+empty string.
+
+A format string may be empty. An empty format string is equivalent to the
+'none' alias. In this case, hyperlinks will be disabled.
+
+At present, the default format when ripgrep detects a tty on stdout all systems
+is 'default'. This is an alias that expands to file://{host}{path} on Unix and
+file://{path} on Windows. When stdout is not a tty, then the default format
+behaves as if it were 'none'. That is, hyperlinks are disabled.
+
+Note that hyperlinks are only written when a path is also in the output
+and colors are enabled. To write hyperlinks without colors, you'll need to
+configure ripgrep to not colorize anything without actually disabling all ANSI
+escape codes completely:
+
+    --colors 'path:none' --colors 'line:none' --colors 'column:none' --colors 'match:none'
+
+ripgrep works this way because it treats the --color=(never|always|auto) flag
+as a proxy for whether ANSI escape codes should be used at all. This means
+that environment variables like NO_COLOR=1 and TERM=dumb not only disable
+colors, but hyperlinks as well. Similarly, colors and hyperlinks are disabled
+when ripgrep is not writing to a tty. (Unless one forces the issue by setting
+--color=always.)
+
+If you're searching a file directly, for example:
+
+    rg foo path/to/file
+
+then hyperlinks will not be emitted since the path given does not appear
+in the output. To make the path appear, and thus also a hyperlink, use the
+-H/--with-filename flag.
+
+For more information on hyperlinks in terminal emulators, see:
+https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
+"
+    );
+    let arg =
+        RGArg::flag("hyperlink-format", "FORMAT").help(SHORT).long_help(LONG);
+    args.push(arg);
+}
+
 fn flag_iglob(args: &mut Vec<RGArg>) {
     const SHORT: &str = "Include or exclude files case insensitively.";
     const LONG: &str = long!(
@@ -1711,6 +1814,8 @@ fn flag_line_number(args: &mut Vec<RGArg>) {
         "\
 Show line numbers (1-based). This is enabled by default when searching in a
 terminal.
+
+This flag overrides --no-line-number.
 "
     );
     let arg = RGArg::switch("line-number")
@@ -1725,6 +1830,8 @@ terminal.
         "\
 Suppress line numbers. This is enabled by default when not searching in a
 terminal.
+
+This flag overrides --line-number.
 "
     );
     let arg = RGArg::switch("no-line-number")
@@ -1927,13 +2034,16 @@ Nevertheless, if you only care about matches spanning at most one line, then it
 is always better to disable multiline mode.
 
 This flag can be disabled with --no-multiline.
+
+This overrides the --stop-on-nonmatch flag.
 "
     );
     let arg = RGArg::switch("multiline")
         .short("U")
         .help(SHORT)
         .long_help(LONG)
-        .overrides("no-multiline");
+        .overrides("no-multiline")
+        .overrides("stop-on-nonmatch");
     args.push(arg);
 
     let arg = RGArg::switch("no-multiline").hidden().overrides("multiline");
@@ -2583,8 +2693,8 @@ Do not print anything to stdout. If a match is found in a file, then ripgrep
 will stop searching. This is useful when ripgrep is used only for its exit
 code (which will be an error if no matches are found).
 
-When --files is used, then ripgrep will stop finding files after finding the
-first file that matches all ignore rules.
+When --files is used, ripgrep will stop finding files after finding the
+first file that does not match any ignore rules.
 "
     );
     let arg = RGArg::switch("quiet").short("q").help(SHORT).long_help(LONG);
@@ -2646,6 +2756,17 @@ Capture group indices (e.g., $5) and names (e.g., $foo) are supported in the
 replacement string. Capture group indices are numbered based on the position of
 the opening parenthesis of the group, where the leftmost such group is $1. The
 special $0 group corresponds to the entire match.
+
+The name of a group is formed by taking the longest string of letters, numbers
+and underscores (i.e. [_0-9A-Za-z]) after the $. For example, $1a will be
+replaced with the group named '1a', not the group at index 1. If the group's
+name contains characters that aren't letters, numbers or underscores, or you
+want to immediately follow the group with another string, the name should be
+put inside braces. For example, ${1}a will take the content of the group at
+index 1 and append 'a' to the end of it.
+
+If an index or name does not refer to a valid capture group, it will be
+replaced with an empty string.
 
 In shells such as Bash and zsh, you should wrap the pattern in single quotes
 instead of double quotes. Otherwise, capture group indices will be replaced by
@@ -2841,6 +2962,25 @@ This flag can be disabled with --no-stats.
     args.push(arg);
 
     let arg = RGArg::switch("no-stats").hidden().overrides("stats");
+    args.push(arg);
+}
+
+fn flag_stop_on_nonmatch(args: &mut Vec<RGArg>) {
+    const SHORT: &str = "Stop searching after a non-match.";
+    const LONG: &str = long!(
+        "\
+Enabling this option will cause ripgrep to stop reading a file once it
+encounters a non-matching line after it has encountered a matching line.
+This is useful if it is expected that all matches in a given file will be on
+sequential lines, for example due to the lines being sorted.
+
+This overrides the -U/--multiline flag.
+"
+    );
+    let arg = RGArg::switch("stop-on-nonmatch")
+        .help(SHORT)
+        .long_help(LONG)
+        .overrides("multiline");
     args.push(arg);
 }
 

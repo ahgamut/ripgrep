@@ -787,6 +787,31 @@ rgtest!(f1466_no_ignore_files, |dir: Dir, mut cmd: TestCommand| {
     eqnice!("foo\n", cmd.arg("-u").stdout());
 });
 
+// See: https://github.com/BurntSushi/ripgrep/pull/2361
+rgtest!(f2361_sort_nested_files, |dir: Dir, mut cmd: TestCommand| {
+    use std::{thread::sleep, time::Duration};
+
+    if crate::util::is_cross() {
+        return;
+    }
+    dir.create("foo", "1");
+    sleep(Duration::from_millis(100));
+    dir.create_dir("dir");
+    sleep(Duration::from_millis(100));
+    dir.create(dir.path().join("dir").join("bar"), "1");
+
+    cmd.arg("--sort").arg("accessed").arg("--files");
+    eqnice!("foo\ndir/bar\n", cmd.stdout());
+
+    dir.create("foo", "2");
+    sleep(Duration::from_millis(100));
+    dir.create(dir.path().join("dir").join("bar"), "2");
+    sleep(Duration::from_millis(100));
+
+    cmd.arg("--sort").arg("accessed").arg("--files");
+    eqnice!("foo\ndir/bar\n", cmd.stdout());
+});
+
 // See: https://github.com/BurntSushi/ripgrep/issues/1404
 rgtest!(f1404_nothing_searched_warning, |dir: Dir, mut cmd: TestCommand| {
     dir.create(".ignore", "ignored-dir/**");
@@ -921,6 +946,23 @@ rgtest!(f1842_field_match_separator, |dir: Dir, _: TestCommand| {
     eqnice!(expected, dir.command().args(&args).stdout());
 });
 
+// See: https://github.com/BurntSushi/ripgrep/issues/2288
+rgtest!(f2288_context_partial_override, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("test", "1\n2\n3\n4\n5\n6\n7\n8\n9\n");
+    cmd.args(&["-C1", "-A2", "5", "test"]);
+    eqnice!("4\n5\n6\n7\n", cmd.stdout());
+});
+
+// See: https://github.com/BurntSushi/ripgrep/issues/2288
+rgtest!(
+    f2288_context_partial_override_rev,
+    |dir: Dir, mut cmd: TestCommand| {
+        dir.create("test", "1\n2\n3\n4\n5\n6\n7\n8\n9\n");
+        cmd.args(&["-A2", "-C1", "5", "test"]);
+        eqnice!("4\n5\n6\n7\n", cmd.stdout());
+    }
+);
+
 rgtest!(no_context_sep, |dir: Dir, mut cmd: TestCommand| {
     dir.create("test", "foo\nctx\nbar\nctx\nfoo\nctx");
     cmd.args(&["-A1", "--no-context-separator", "foo", "test"]);
@@ -974,4 +1016,11 @@ rgtest!(context_sep_empty, |dir: Dir, mut cmd: TestCommand| {
 rgtest!(no_unicode, |dir: Dir, mut cmd: TestCommand| {
     dir.create("test", "δ");
     cmd.arg("-i").arg("--no-unicode").arg("Δ").assert_err();
+});
+
+// See: https://github.com/BurntSushi/ripgrep/issues/1790
+rgtest!(stop_on_nonmatch, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("test", "line1\nline2\nline3\nline4\nline5");
+    cmd.args(&["--stop-on-nonmatch", "[235]"]);
+    eqnice!("test:line2\ntest:line3\n", cmd.stdout());
 });
